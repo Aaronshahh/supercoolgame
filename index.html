@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Boomerangeon — style demo</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0a080c; overflow: hidden; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+             font: 12px/1.4 ui-monospace, Menlo, monospace; color: #6a5e70; }
+      #game canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: none; }
+      #hint { user-select: none; }
+      #hint b { color: #a89aae; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="hint">
+      <b>WASD</b> move · <b>mouse</b> aim · <b>LMB</b> throw (hold to hover, release to recall) · <b>RMB</b> melee · <b>Space</b> dash ·
+      <b>1–4</b> character · <b>L</b> lighting
+    </div>
+    <script type="module" src="/src/demo/main.ts"></script>
+  </body>
+</html>
