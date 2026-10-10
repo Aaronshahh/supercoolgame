@@ -18,10 +18,10 @@ hazards (02) and power-ups (03) plug into the hooks defined here.
 | Concept | Value |
 |---|---|
 | Simulation tick | 60 Hz fixed step. **All gameplay numbers are in ticks and pixels-per-tick.** |
-| Internal resolution | 480 × 270 px, scaled by an integer factor to the window |
+| Internal resolution | 576 × 318 px for the reference room, up to 640 × 366 px for the largest (02 §2), scaled by an integer factor to the window |
 | Tile | 16 × 16 px |
-| Arena grid | 30 columns × 16 rows (480 × 256 px), drawn below a 14 px HUD strip |
-| Outer ring | The outermost ring of tiles is always solid wall, so the playable interior is 28 × 14 tiles (448 × 224 px) |
+| Arena grid | The reference room (The Cellar) is 36 columns × 19 rows (576 × 304 px), drawn below a 14 px HUD strip. Aaron, 2026-10-09: "10% smaller than the original demo area" (the 40 × 21 movement floor); it replaces the 30 × 16 proposal. The other rooms keep its number of open tiles (520 ± 4 %) in footprints of their own, up to 40 × 22 (Aaron, same day: "not the same exact formatting size every single time … the same amount of total squares, organized in interesting ways that fit the room's theme"; 02 §2, §7) |
+| Outer ring | The outermost ring of tiles is always solid wall, and the top wall is two rows deep (cap and face, with the torches), so the Cellar's playable interior is 34 × 16 tiles (544 × 256 px). Thicker wall masses shape the other rooms (cut corners, bays, a cross) |
 | Camera | None. Every arena is a single fixed screen (like Boomerang Fu). Screen shake is a render-only effect. |
 | Perspective | 3/4 top-down ("Gungeon view"). Simulation is pure 2D on the ground plane; sprites are y-sorted by their feet position. |
 
@@ -138,8 +138,15 @@ Each tick, with `input` the 8-directional keyboard vector (diagonals normalised 
   `vel = input × speed`. The direction snaps to the new input instantly, so a reversal is a hard
   stop-and-go in one tick, not a curve, and it never pays the windup.
 - no input → `speed = max(|vel| − DECEL, 0)`, direction unchanged; `windup = 0`.
-- during a **dash slide** (§6) none of the above applies: `vel ×= DASH_SLIDE_FRICTION` each tick and
-  input adds only `DASH_SLIDE_STEER` px/tick² of nudge, so you drift where the dash pointed.
+- out of a **dash** (§6) the rules above keep applying to `vel`, but the feet also carry the
+  **slide**: a second vector `slide`, set to `DASH_SLIDE_SPEED` in the dash direction when the dash
+  ends, decayed by `DASH_SLIDE_FRICTION` every tick and dropped under `DASH_SLIDE_MIN`. Position
+  moves by `vel + slide`. The stick never replaces the slide, it only adds to it: forward
+  overshoots, sideways drifts, back holds you in place until the slide has dropped under walking
+  speed. The standing-start windup is skipped while `slide` is non-zero (you are moving, just not
+  where you want). Aaron, 2026-10-08: the slide exists to punish obsessive dashing; 2026-10-09: the
+  punishment is unwanted movement, not a stop, and the walk has to compound with the slide rather
+  than wait for it — a locked slide followed by control read as a freeze, then as a longer roll.
 
 Measured from Boomerang Fu (see `notes-boomerang-fu-motion.md`): characters reach cruise and come to
 rest within 2–3 frames, and change direction without any visible arc. Our earlier vector-integrated
@@ -335,13 +342,12 @@ Resolved before kills are applied (collect-then-apply), so it is independent of 
 
 | Constant | Value |
 |---|---|
-| `DASH_SPEED` | 6 px/tick |
-| `DASH_SLIDE_SPEED` | 4 px/tick carried out of the dash |
-| `DASH_SLIDE_TICKS` | 14 |
-| `DASH_SLIDE_FRICTION` | ×0.86 per tick |
-| `DASH_SLIDE_STEER` | 0.3 px/tick² of input authority while sliding |
-| `DASH_TICKS` | 8 → 48 px, exactly 3 tiles |
-| `DASH_INVULN_TICKS` | **6** — the first 6 of the 8 ticks are invulnerable (100 ms, 36 px) |
+| `DASH_SPEED` | 5.4 px/tick (was 6; Aaron, 2026-10-09: "reduce the actual distance we gain from the roll ... by 10 %. Same momentum") |
+| `DASH_SLIDE_SPEED` | 4 px/tick carried out of the dash as the slide's starting speed |
+| `DASH_SLIDE_FRICTION` | ×0.93 per tick on the slide — above walking speed for 11 ticks, gone after ≈ 41 |
+| `DASH_SLIDE_MIN` | 0.2 px/tick — the slide is dropped below this |
+| `DASH_TICKS` | 8 → 43 px, a hair under 3 tiles |
+| `DASH_INVULN_TICKS` | **6** — the first 6 of the 8 ticks are invulnerable (100 ms, 32 px) |
 | `DASH_COOLDOWN_TICKS` | 30 after the dash ends (one dash every ~0.63 s) |
 | `SHOVE_IMPULSE` | 4 px/tick |
 
@@ -350,7 +356,7 @@ Resolved before kills are applied (collect-then-apply), so it is independent of 
 - Readability: the dash is drawn as a roll (§2, action poses) with an afterimage trail. There is no invulnerability flash — the roll is the tell, as with a Dark Souls roll, and players learn where the window ends. A boomerang passing through an invulnerable player emits a "whiff" event (small spark, soft sound).
 - **Shove**: on overlapping another player during a dash, that player receives `SHOVE_IMPULSE` in the dash direction and the dash ends early (invulnerability ends with it). Shove is the only way to move an opponent against their will, and it can push them into a pit.
 - Dash cannot start during melee windup/active or throw recovery; the input buffer fires it afterwards.
-- **Slide-out**: the dash does not end in a walk. At `DASH_TICKS` the player keeps `DASH_SLIDE_SPEED` in the dash direction and slides for `DASH_SLIDE_TICKS` under `DASH_SLIDE_FRICTION`, with movement input only nudging the heading by `DASH_SLIDE_STEER`. That is ≈ 22 px of drift on top of the 48 px dash, and you cannot stop on a dime out of it — the commitment is the price of the i-frames. A dash stopped by a wall ends dead with no slide.
+- **Slide-out**: the dash does not end in a walk, and it does not end in a lockout either. At `DASH_TICKS` the dash speed becomes the **slide**, a base velocity of `DASH_SLIDE_SPEED` in the dash direction that `DASH_SLIDE_FRICTION` bleeds off over ≈ 41 ticks (0.7 s), and the stick works the whole time **on top of it** (§3): the walk is added to the slide, never substituted for it. Measured on the demo floor, from where the dash ends (48 px at the time; it is 43 px now, the slide is unchanged): no input drifts ≈ 53 px; forward held compounds to ≈ 5 px/tick and covers ≈ 123 px; sideways held walks across at full speed while still drifting the same 53 px forward; back held is still carried ≈ 12 px forward for 11 ticks before it starts gaining, and takes ≈ 27 ticks to get back to where the dash ended. That is the punishment: not a stop, but movement you did not ask for, and chaining dashes chains it (Aaron, 2026-10-08: "punish the player for obsessive dashing"; 2026-10-09: "punished with unwanted movement", "the movement adds, so the slide is a base speed for a little bit"). Throw, melee and another dash are allowed throughout (a new dash discards the slide). A dash stopped by a wall ends dead with no slide; a wall or pit edge also kills the slide on that axis, and like the dash itself the slide is voluntary movement that cannot enter a pit. On ice (02 §4.5) the slide decays at `ICE_SLIDE_FRICTION` instead and carries much further.
 
 A freshly thrown boomerang at 10 px/tick crosses a player's hurtbox in about 2 ticks, so a reactive
 dash still dodges it cleanly, but the window to react is tight (a 14-tile throw covers its first
@@ -501,7 +507,8 @@ Decided in v2: mouse aim (yes), dash invulnerability (yes, 6 of 8 ticks), max on
 ```
 TICK_RATE                  = 60
 TILE                       = 16
-ARENA_COLS, ARENA_ROWS     = 30, 16
+MAX_ARENA_COLS, MAX_ARENA_ROWS = 40, 22   (the Cellar is 36 × 19)
+OPEN_TILE_BUDGET           = 520          (± 4 %, per room)
 HUD_HEIGHT                 = 14
 MAX_PLAYERS                = 6
 
@@ -514,14 +521,13 @@ START_WINDUP_TICKS         = 5
 MELEE_SPEED_MULT           = 0.5
 INPUT_BUFFER_TICKS         = 6
 
-DASH_SPEED                 = 6
+DASH_SPEED                 = 5.4    # 43 px over the 8 ticks; the slide after it is unchanged
 DASH_TICKS                 = 8
 DASH_INVULN_TICKS          = 6
 DASH_COOLDOWN_TICKS        = 30
 DASH_SLIDE_SPEED           = 4
-DASH_SLIDE_TICKS           = 14
-DASH_SLIDE_FRICTION        = 0.86
-DASH_SLIDE_STEER           = 0.3
+DASH_SLIDE_FRICTION        = 0.93   # the walk is added on top of the slide, never replaces it
+DASH_SLIDE_MIN             = 0.2
 SHOVE_IMPULSE              = 4
 PUNCH_IMPULSE              = 5
 CLASH_IMPULSE              = 4

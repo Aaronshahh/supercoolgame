@@ -45,6 +45,28 @@ export const PAL = {
   grassBase: '#2f4a2c',
   grass: ['#4f7a3a', '#6a9a48', '#3f6530'],
   grassCut: '#26381f',
+  grassSprout: '#5c8a3c',
+
+  // hazard tiles (docs/02): ice slabs, iron grates and belts, stone movers
+  ice: ['#5f7f96', '#66889f', '#5a788e', '#637f94'],
+  iceLight: '#9dc0d4',
+  iceDark: '#3f5a6e',
+  iceCrack: '#86aabf',
+  iron: '#2b2630',
+  ironDark: '#17131b',
+  ironLight: '#4a434f',
+  stone: '#5c5362',
+  stoneLight: '#786e7e',
+  stoneDark: '#3c353f',
+  crack: '#120d14',
+  // portals, Portal-2 style: a blue mouth and an orange one. The only saturated blue and the only
+  // orange-on-black in the game, so a mouth reads from across the room and the pair reads as a pair
+  portalBlue: '#1ea7ff',
+  portalBlueLight: '#b4e4ff',
+  portalBlueDark: '#071626',
+  portalOrange: '#ff6a1a',
+  portalOrangeLight: '#ffd0a0',
+  portalOrangeDark: '#200a03',
 
   bg: '#0a080c',
   hud: '#0e0a12',

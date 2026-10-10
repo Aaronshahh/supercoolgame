@@ -8,6 +8,8 @@ export interface Screen {
   display: HTMLCanvasElement
   readonly scale: number
   present(): void
+  /** Change the internal resolution (a different-sized arena); the display rescales to fit. */
+  resize(w: number, h: number): void
   toInternal(clientX: number, clientY: number): [number, number]
 }
 
@@ -26,7 +28,7 @@ export function createScreen(w: number, h: number, mount: HTMLElement, reserveBo
   }
 
   // Resizing a canvas clears it, so re-present immediately rather than waiting for the next frame.
-  function resize() {
+  function fit() {
     const sw = window.innerWidth
     const sh = window.innerHeight - reserveBottom
     scale = Math.max(1, Math.floor(Math.min(sw / w, sh / h)))
@@ -36,8 +38,8 @@ export function createScreen(w: number, h: number, mount: HTMLElement, reserveBo
     display.style.height = `${h * scale}px`
     present()
   }
-  window.addEventListener('resize', resize)
-  resize()
+  window.addEventListener('resize', fit)
+  fit()
 
   return {
     canvas,
@@ -47,6 +49,15 @@ export function createScreen(w: number, h: number, mount: HTMLElement, reserveBo
       return scale
     },
     present,
+    resize(nw, nh) {
+      if (nw === w && nh === h) return
+      w = nw
+      h = nh
+      canvas.width = w // clears it; the caller renders the next frame right after
+      canvas.height = h
+      ctx.imageSmoothingEnabled = false
+      fit()
+    },
     toInternal(clientX, clientY) {
       const r = display.getBoundingClientRect()
       return [(clientX - r.left) / scale, (clientY - r.top) / scale]
