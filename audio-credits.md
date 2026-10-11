@@ -14,9 +14,10 @@ or metadata and fails if any no longer shows CC0 1.0; the set below passed on 20
 for adding a sound is in `docs/07-audio.md` §5: CC0 or public domain only, provenance recorded here.
 
 **The music is original.** The nine room themes in `src/audio/songs.ts` are note data played by our
-own synthesizer (`src/audio/music.ts`). Its drum kits, though, play the CC0 one-shots listed under
+own synthesizer (`src/audio/score.ts`), rendered by `npm run render-music` into the looping MP3
+tracks in `public/music/`. Their drum kits incorporate the CC0 one-shots listed under
 "the drums" below (kicks, snares, hats, cymbals, toms, alfaia and timpani, orchestral and sub hits,
-anvils, reversed cymbals), with a synthesized drum as the fallback until they load.
+anvils, reversed cymbals). No external songs or paid music services are used.
 
 ## Sources
 
@@ -175,4 +176,4 @@ are generated in `src/audio/synth.ts` and `src/audio/sfx.ts` with no recordings.
 event above also plays a synthesized layer under the recording (`src/audio/samples.ts`): the sub,
 the first millisecond, the material's ring, the air after the hit. If a file fails to download or
 decode, that event falls back to its fully synthesized recipe in `src/audio/sfx.ts`, and a drum to
-its synthesized voice in `src/audio/music.ts`.
+its synthesized voice in `src/audio/score.ts` when testing instruments.
