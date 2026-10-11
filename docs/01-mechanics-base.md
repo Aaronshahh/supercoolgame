@@ -80,7 +80,7 @@ alive, team, score, kills
 IDLE ──throw pressed, holding boomerang──▶ boomerang launched, 4-tick throw recovery, stay IDLE
 IDLE ──melee pressed──▶ MELEE (windup → active → recovery) ─▶ IDLE
 IDLE ──dash pressed, cooldown 0──▶ DASH (8 ticks, first 6 invulnerable) ─▶ IDLE
-any  ──killed──▶ DEAD (until next round)
+any  ──killed──▶ DEAD (respawn after 90 ticks if lives remain)
 ```
 
 Only one of MELEE / DASH is active at a time, and neither can start while the other is running.
@@ -101,6 +101,10 @@ the simulation or the netcode:
 | Catch | 1 (clutch, boomerang drawn in the pose) | the catch or pickup event; 14 ticks |
 | Melee | 4 (windup, swing, follow-through, recover) | `MELEE` windup, active, then the two halves of recovery |
 | Roll | 6 (tuck, four tumble frames, unroll) | starts with `DASH`; 3 ticks per frame, 18 ticks, so it finishes during the slide |
+
+2026-10-09: two more render-side motions with no frames of their own, specified in 04 §5: the
+standing pose breathes (the top of the body drops a pixel for 10 ticks every 72), and a respawn
+drops in from above over 14 ticks and squashes on landing instead of appearing.
 
 Frames exist for the three facings (down, side, up). Side frames face right and are mirrored for
 left; down and up action frames are drawn with the arm on the right and are mirrored when the aim
@@ -183,8 +187,8 @@ is stolen, dropped, or stranded, **you have to go pick it up again.**
 | `THROW_RECOVERY_TICKS` | 4 — no throw or melee may start until it ends (dash may) |
 | `THROW_SPAWN_OFFSET` | boomerang appears at `pos + aim × 8` |
 
-- **Click to throw.** No charging and no range control: the cursor sets the **direction only**. Every throw covers exactly `THROW_RANGE` of path, measured along the flight through every wall bounce, then stops (§4.2). The aim indicator traces that path and puts the reticle where the boomerang will stop, so range is controlled by positioning and by using walls, not by the mouse — as in Boomerang Fu.
-- **Hold to hover, release to recall.** Keeping the throw button down after the throw makes the boomerang hang at its stop point for as long as the button is held (up to `BOOMERANG_HOVER_MAX_TICKS`), still lethal. Letting go recalls it at full speed from the first tick instead of the gradual return (§4.2). A click that is released before the boomerang stops just gives the ordinary throw.
+- **Click to throw.** No charging: the cursor sets the **direction only**. An uninterrupted throw covers `THROW_RANGE` of path, measured through every wall bounce, then stops (§4.2). The aim indicator traces that full path; a manual hover can stop it earlier.
+- **Hover once, anywhere; release to return.** After the launch click, press and hold again on either leg to brake over six ticks (100 ms), then hover, still lethal, for up to `BOOMERANG_HOVER_MAX_TICKS`. Release commits to a normal accelerating return from zero velocity, even during braking. Holding the launch click lets it fly out normally and uses the hover at the endpoint. Each throw has only one hover; later holds cannot stop its return again.
 - Movement is unaffected by throwing. The 4-tick recovery exists to prevent instant melee follow-ups; the character's throw pose (release, then follow-through) plays for 24 ticks over it and is purely visual (§2, action poses).
 - Throwing while a dash or melee is active is not allowed; the 6-tick input buffer fires it as soon as the state ends.
 
@@ -204,13 +208,12 @@ read as "moving at a constant speed and then stopping". The even older constant-
 | Constant | Value | Notes |
 |---|---|---|
 | `BOOMERANG_RADIUS` | 10 px | Hit radius against players and melee (Aaron's number, 2026-10-08). The sprite is an 11 px chevron; wall collision uses a tighter 4 px (`BOOMERANG_WALL_RADIUS`) so bounces hug the wall face |
-| `BOOMERANG_SPEED` | **10 px/tick** (600 px/s) | Launch speed, ≈ 5.5× player speed. Average over the flight is half that |
-| `BOOMERANG_DECEL` | derived: `SPEED² / (2·range + SPEED)` | ≈ 0.218 px/tick² for a 224 px throw: 10 → 0 in 46 ticks, exactly `range` of path |
+| `BOOMERANG_SPEED` | **9.5 px/tick** (570 px/s) | Launch speed, ≈ 5.3× player speed. Average over the flight is half that |
+| `BOOMERANG_DECEL` | derived: `SPEED² / (2·range + SPEED)` | ≈ 0.197 px/tick² for a 224 px throw: 9.5 → 0 in 49 ticks, exactly `range` of path |
 | `BOOMERANG_HANG_TICKS` | 3 | Motionless at the far end before turning back, still lethal. The slow approach already reads as a pause |
-| `BOOMERANG_HOVER_MAX_TICKS` | 90 (1.5 s) | Longest the throw button can hold it hanging |
+| `BOOMERANG_HOVER_MAX_TICKS` | 45 (0.75 s) | Longest each hold can keep it hanging |
 | `BOOMERANG_RETURN_ACCEL` | = the throw's `DECEL` | Mirrors the outbound, so a full throw gets back to ≈ 10 as it reaches a stationary owner |
-| `BOOMERANG_RETURN_SPEED` | 12 px/tick | Cap on the return |
-| `BOOMERANG_RECALL_SPEED` | 12 px/tick | A hovered boomerang comes back at this from its first tick |
+| `BOOMERANG_RETURN_SPEED` | 11.4 px/tick | Cap on the return |
 | `BOOMERANG_BRAKE` | 0.6 px/tick² | Emergency decel once the bounce or flight cap is hit |
 | `BOOMERANG_TURN_RATE` | 0.16 × speed per tick | Homing steer while returning. Far from a straight line only if the owner moved |
 | `BOOMERANG_TURN_RATE_NEAR` | 0.4 × speed per tick | Within `BOOMERANG_NEAR_DIST` of the owner, so the catch lands instead of orbiting |
@@ -227,22 +230,23 @@ unchanged, then move and accumulate `traveled`. Reflects off solid tiles (veloci
 to the wall is negated; speed is preserved, and `traveled` keeps counting). After 4 bounces or the
 flight limit `decel` is raised to `BRAKE` so it stops early. On reaching zero → HANG.
 
-A 14-tile throw: 224 px over 46 ticks → stops after 0.77 s, having covered half the distance in
+A 14-tile throw: 224 px over 49 ticks → stops after 0.82 s, having covered half the distance in
 the first 13 ticks and crawling through the last tile at under 2 px/tick. Bounces do not reset
 `traveled`: a throw into a nearby wall comes most of the way back past the thrower before it
 stops, which is how you hit someone standing behind you.
 
-**HANG**: motionless at the target, still lethal — standing on someone's reticle is a mistake.
-Lasts `HANG_TICKS`, **or for as long as the owner holds the throw button** (a *hover*), up to
-`HOVER_MAX_TICKS`. Then → RETURNING: after a plain hang with `vel = 0`; after a hover (any hang
-longer than `HANG_TICKS`) it is a **recall** and leaves at `RECALL_SPEED` straight at the owner.
-The hover is what makes the parabolic flight a trap: park it on a doorway, hold, let go the moment
-someone steps in.
+**HANG**: motionless and still lethal, at the natural endpoint or after manual braking. A manual
+hover consumes the throw's single hover immediately. Over at most six ticks its speed falls to
+zero along the current direction; outbound walls still reflect it. Braking does not change the
+normal return acceleration. It then stays still until release or `HOVER_MAX_TICKS`. Releasing
+during braking also commits to returning once stopped, even if pressed again before the stop.
+Only the natural, unheld endpoint has a minimum `HANG_TICKS` pause. The used hover is not restored
+by deflecting. Armed fuse boomerangs and Triple's phantoms cannot hover.
 
-**RETURNING**: each tick, `speed = min(|vel| + RETURN_ACCEL, RETURN_SPEED)` (a recall never drops
-below `RECALL_SPEED`); `desired = normalize(owner.pos − pos) × speed`; `vel` moves toward
+**RETURNING**: each tick, `speed = min(|vel| + RETURN_ACCEL, RETURN_SPEED)`;
+`desired = normalize(owner.pos − pos) × speed`; `vel` moves toward
 `desired` by at most `TURN_RATE × speed + RETURN_ACCEL` (`TURN_RATE_NEAR × speed + RETURN_ACCEL`
-inside `NEAR_DIST`). Because a plain return starts from rest its first ticks point straight at the
+inside `NEAR_DIST`). Because every return starts from rest its first ticks point straight at the
 owner, so a stationary thrower sees it fly back along the same line it went out on. Flies **over**
 walls and obstacles (it is coming home). When within `CATCH_RADIUS` of the owner:
 - owner is empty-handed → **caught**, back to HELD;
@@ -284,10 +288,10 @@ Boomerangs fly **over** pits and tall grass (grass gets cut, see 02). They break
 | Hitbox | circle radius **11 px**, centred at `pos + aim × 10` (≈21 px reach, ~120° effective arc) |
 | `CLASH_IMPULSE` | 4 px/tick knockback to both players |
 | `PUNCH_IMPULSE` | 5 px/tick knockback to the target |
-| `DEFLECT_SPEED` | 7.5 px/tick — launch speed of a deflected boomerang; it decelerates to rest over `DEFLECT_RANGE` like a throw (`decel` ≈ 0.24) |
+| `DEFLECT_SPEED` | 7.125 px/tick — launch speed of a deflected boomerang; it decelerates to rest over `DEFLECT_RANGE` like a throw (`decel` ≈ 0.22) |
 | `DEFLECT_RANGE` | 112 px (7 tiles) — outbound range of a deflected boomerang |
 | `DEFLECT_GRACE` | 1 tick — the swing keeps deflecting boomerangs (not killing) for this long after its active frames, so the deflect window is 5 ticks against a 4-tick kill window. Aaron asked for deflects to be "more forgiving but still hard, ~20% more time" (2026-10-08) |
-| `BOMB_SPEED_MULT` | 0.8 — launch speed multiplier for an armed boomerang (8 px/tick, slower than a throw: it is heavy now, not fast. Aaron, 2026-10-08) |
+| `BOMB_SPEED_MULT` | 0.8 — launch speed multiplier for an armed boomerang (7.6 px/tick, slower than a throw: it is heavy now, not fast. Aaron, 2026-10-08) |
 | `BOMB_RANGE` | 157 px — 70 % of `THROW_RANGE`, the armed flight |
 | `BOMB_PAUSE` | 15 ticks at rest, quiet, before the first beep |
 | `BOMB_BEEP_GAP` | 10 ticks from the first beep to the second |
@@ -302,7 +306,7 @@ Boomerangs fly **over** pits and tall grass (grass gets cut, see 02). They break
 **With the boomerang in hand ("slash")** — anything in the hitbox during active frames:
 
 - Enemy player → **killed** (sliced). Invulnerable (dashing) players are not affected.
-- Boomerang in flight (any owner, including your own; OUTBOUND, HANG or RETURNING) → **deflected**: owner becomes the attacker; state becomes OUTBOUND with `vel = aim × DEFLECT_SPEED`, `range = DEFLECT_RANGE`, `traveled = 0`, `decel` recomputed for the new speed and range, recall flag and bounce count reset. One deflect per boomerang per swing. The deflect check also runs for `DEFLECT_GRACE` ticks after the active frames end, so a swing that was a hair early still connects with the boomerang.
+- Boomerang in flight (any owner, including your own; OUTBOUND, HANG or RETURNING) → **deflected**: owner becomes the attacker; state becomes OUTBOUND with `vel = aim × DEFLECT_SPEED`, `range = DEFLECT_RANGE`, `traveled = 0`, `decel` recomputed for the new speed and range, active hover/braking and bounce count reset; a used hover stays used. One deflect per boomerang per swing. The deflect check also runs for `DEFLECT_GRACE` ticks after the active frames end, so a swing that was a hair early still connects with the boomerang.
 - Crate → broken (02). Tall grass → cut (02).
 
 **Arming your own boomerang** (Aaron, 2026-10-08). A deflect that connects with a boomerang you
@@ -342,8 +346,8 @@ Resolved before kills are applied (collect-then-apply), so it is independent of 
 
 | Constant | Value |
 |---|---|
-| `DASH_SPEED` | 5.4 px/tick (was 6; Aaron, 2026-10-09: "reduce the actual distance we gain from the roll ... by 10 %. Same momentum") |
-| `DASH_SLIDE_SPEED` | 4 px/tick carried out of the dash as the slide's starting speed |
+| `DASH_SPEED` | 5.13 px/tick (5% less than 5.4, 2026-10-11) |
+| `DASH_SLIDE_SPEED` | 3.8 px/tick carried out of the dash as the slide's starting speed |
 | `DASH_SLIDE_FRICTION` | ×0.93 per tick on the slide — above walking speed for 11 ticks, gone after ≈ 41 |
 | `DASH_SLIDE_MIN` | 0.2 px/tick — the slide is dropped below this |
 | `DASH_TICKS` | 8 → 43 px, a hair under 3 tiles |
@@ -356,14 +360,14 @@ Resolved before kills are applied (collect-then-apply), so it is independent of 
 - Readability: the dash is drawn as a roll (§2, action poses) with an afterimage trail. There is no invulnerability flash — the roll is the tell, as with a Dark Souls roll, and players learn where the window ends. A boomerang passing through an invulnerable player emits a "whiff" event (small spark, soft sound).
 - **Shove**: on overlapping another player during a dash, that player receives `SHOVE_IMPULSE` in the dash direction and the dash ends early (invulnerability ends with it). Shove is the only way to move an opponent against their will, and it can push them into a pit.
 - Dash cannot start during melee windup/active or throw recovery; the input buffer fires it afterwards.
-- **Slide-out**: the dash does not end in a walk, and it does not end in a lockout either. At `DASH_TICKS` the dash speed becomes the **slide**, a base velocity of `DASH_SLIDE_SPEED` in the dash direction that `DASH_SLIDE_FRICTION` bleeds off over ≈ 41 ticks (0.7 s), and the stick works the whole time **on top of it** (§3): the walk is added to the slide, never substituted for it. Measured on the demo floor, from where the dash ends (48 px at the time; it is 43 px now, the slide is unchanged): no input drifts ≈ 53 px; forward held compounds to ≈ 5 px/tick and covers ≈ 123 px; sideways held walks across at full speed while still drifting the same 53 px forward; back held is still carried ≈ 12 px forward for 11 ticks before it starts gaining, and takes ≈ 27 ticks to get back to where the dash ended. That is the punishment: not a stop, but movement you did not ask for, and chaining dashes chains it (Aaron, 2026-10-08: "punish the player for obsessive dashing"; 2026-10-09: "punished with unwanted movement", "the movement adds, so the slide is a base speed for a little bit"). Throw, melee and another dash are allowed throughout (a new dash discards the slide). A dash stopped by a wall ends dead with no slide; a wall or pit edge also kills the slide on that axis, and like the dash itself the slide is voluntary movement that cannot enter a pit. On ice (02 §4.5) the slide decays at `ICE_SLIDE_FRICTION` instead and carries much further.
+- **Slide-out**: the dash does not end in a walk, and it does not end in a lockout either. At `DASH_TICKS` the dash speed becomes the **slide**, a base velocity of `DASH_SLIDE_SPEED` in the dash direction that `DASH_SLIDE_FRICTION` bleeds off over ≈ 41 ticks (0.7 s), and the stick works the whole time **on top of it** (§3): the walk is added to the slide, never substituted for it. Measured on the demo floor, from where the dash ends (48 px at the time; it is now 41 px and the slide starts at 3.8 px/tick; the measurements below predate the 5% reduction): no input drifts ≈ 53 px; forward held compounds to ≈ 5 px/tick and covers ≈ 123 px; sideways held walks across at full speed while still drifting the same 53 px forward; back held is still carried ≈ 12 px forward for 11 ticks before it starts gaining, and takes ≈ 27 ticks to get back to where the dash ended. That is the punishment: not a stop, but movement you did not ask for, and chaining dashes chains it (Aaron, 2026-10-08: "punish the player for obsessive dashing"; 2026-10-09: "punished with unwanted movement", "the movement adds, so the slide is a base speed for a little bit"). Throw, melee and another dash are allowed throughout (a new dash discards the slide). A dash stopped by a wall ends dead with no slide; a wall or pit edge also kills the slide on that axis, and like the dash itself the slide is voluntary movement that cannot enter a pit. On ice (02 §4.5) the slide decays at `ICE_SLIDE_FRICTION` instead and carries much further.
 
 A freshly thrown boomerang at 10 px/tick crosses a player's hurtbox in about 2 ticks, so a reactive
 dash still dodges it cleanly, but the window to react is tight (a 14-tile throw covers its first
 half in ~0.2 s and reaches the far end in 0.77 s); a dash started too early leaves the vulnerable
 tail exposed. That is the intended skill test. Near the end of the flight the boomerang is slow but
-still lethal, and a hovering one can be recalled at 12 px/tick the moment you commit, so a dash
-through either must be timed the same way.
+still lethal. A hovering one accelerates from rest when released, so judge the dash by its
+position and current speed.
 
 ---
 
@@ -379,7 +383,8 @@ the player.
 
 ## 8. Death and the ground
 
-One hit kills. There is no health and no respawn within a round.
+One hit costs one life. Each round starts with 3, 5 or 7 lives per player (default 3). A player with
+lives remaining respawns after 90 ticks (1.5 seconds), with 120 ticks (2 seconds) of spawn protection. This also blocks floor fire, floor hazards and enemy dash shoves.
 
 | Cause | Visual |
 |---|---|
@@ -390,10 +395,14 @@ One hit kills. There is no health and no respawn within a round.
 Pit rule: a player whose feet centre is over a pit tile **while involuntarily moving** falls and
 dies. Voluntary movement (walking, dashing) treats pits as walls. Boomerangs ignore pits entirely.
 
-Dead players spectate until the round ends. Their inputs are ignored.
+Dead players cannot act while waiting to respawn. At zero lives they spectate until the next
+round, which refills everyone’s lives. The HUD distinguishes lives (L) from round wins (W).
 
-On any kill the simulation emits a `kill` event; the renderer does hit-flash, a 3-frame hitstop
-on the *renderer* (not the sim), and screen shake. No sim-level freeze on kills — only at round end.
+On any death, all clients run 18 simulation ticks of slow-motion: 60% speed at first, easing
+back over the last six ticks (about half a second total). A local camera zoom eases up to 9%
+toward the death and back without scaling the HUD. Mouse input uses the inverse view transform.
+Music tempo dips by 10% for 0.6 seconds, easing in and out per note without restarting the song.
+OPTIONS → DEATH ZOOM affects only the camera; shared timing never depends on a local preference.
 
 ---
 
@@ -426,13 +435,14 @@ LOBBY → [ARENA INTRO → READY → PLAYING → ROUND END → RESULTS]×N → M
 |---|---|---|
 | Arena intro | 30 ticks | Arena name slides in; players appear at spawns holding their boomerang |
 | READY | 60 ticks | "READY… GO!" — sim runs but all inputs are ignored (aim still updates so indicators are live) |
-| PLAYING | ≤ 3600 ticks (60 s) | Normal play |
-| ROUND END | 45 ticks | Triggered when ≤ 1 player is alive. Sim frozen; winner callout and slow-mo on the final kill |
+| PLAYING | Until ≤1 player has lives remaining | Respawn until eliminated |
+| ROUND END | 45 ticks | Triggered when ≤ 1 player has lives remaining. Sim frozen; winner callout and slow-mo on the final kill |
 | RESULTS | 90 ticks | Score pips update; skip-able by any player after 30 ticks |
 
-- **Scoring**: last player alive gets **1 point**. If the last two die on the same tick, or the timer runs out with ≥2 alive, the round is a **draw** — no points.
+- **2v2**: Gold and Teal, exactly two players per team, humans or bots. Lives are individual, not pooled. Eliminating one teammate leaves the other playing 1v2. Friendly fire is off for weapons, bombs, fire and blink; allies do not dash-shove or steal each other’s flying boomerangs. Teammates spawn on the same side, and bots target enemies. The last team with lives gets one round win credited to both teammates.
+- **Scoring (free for all)**: last player with lives remaining gets **1 point**. Players waiting to respawn still count. If the last two lose their final lives on the same tick, the round is a **draw** — no points.
 - **Match**: first to `MATCH_TARGET_SCORE` (default **5**; lobby option 3/5/7/10) wins. No "win by two".
-- **Timer**: 60 s is a safety net; typical rounds should end in 15–40 s. A "hurry up" escalation (hazards intensify) is planned in 02 rather than a sudden-death rule here.
+- **Timer**: elapsed time, with no one-minute draw cutoff. Lives determine when the round ends.
 - **Arena rotation**: shuffled (seeded) list of all enabled arenas, no repeats until exhausted.
 - **Spawns**: each arena defines ≥ 6 spawn points; assignment is a seeded shuffle each round.
 - **Match end**: podium ordered by score, then kills. Rematch keeps the lobby; everyone back to 0.
@@ -453,7 +463,7 @@ dash           : held (bit)
 ```
 
 8 bytes per tick per player. Press edges are derived in the sim from the previous tick's struct;
-the `throw` bit's *held* state is also read directly by a hanging boomerang (hover, §4.2).
+the `throw` bit's *held* state is also read directly by an airborne boomerang (hover, §4.2).
 Sending the cursor *position* rather than an angle keeps the struct integer-only (deterministic
 across clients) and gives the sim the aim direction.
 
@@ -463,7 +473,7 @@ across clients) and gives the sim the aim direction.
 |---|---|---|
 | Move | W A S D | Arrow keys |
 | Aim | Mouse cursor | — |
-| Throw (hold to hover, release to recall) | Left mouse button | — |
+| Throw (hold again to brake into one hover per throw, release to return) | Left mouse button | — |
 | Melee | Right mouse button | F |
 | Dash | Space | Shift, or middle mouse |
 | Pause / menu | Esc | — |
@@ -480,8 +490,8 @@ For local testing, two browser tabs on one machine are two players.
 Defined here so 02/03 can attach without changing the core:
 
 - **Tile kinds** (02): `floor`, `wall` (solid, bounces boomerangs), `pit` (blocks voluntary movement, lethal to involuntary movement, boomerangs fly over), `grass` (hides players, cut by boomerangs/melee), `crate` (solid, breakable). The tick order reserves step 9 for dynamic hazards (saw blades, bumpers, moving platforms) and step 10 for pickups. Each hazard declares whether `invulnTicks` protects against it.
-- **Boomerang effect flags** (03): a boomerang carries a small bitfield set at throw time (fire, explosive, big, bounce…). Flags persist through deflects, so a stolen fire boomerang stays on fire.
-- **Player power-up set** (03): per-player set of held power-ups, cleared on death. Power-ups spawn at arena-defined points on a seeded timer and from crates. Power-ups that give "extra boomerangs" are temporary projectiles, not held items — the one-boomerang rule is never bent.
+- **Boomerang effect flags** (03): a boomerang carries a small bitfield set at throw time (fire, explosive, big, bounce…). Flags persist through deflects, so a stolen fire boomerang stays on fire. 03 §5 fills this in as Fire, Bomb, Big, Triple, Ice.
+- **Player power-up set** (03): per-player set of held power-ups, cleared on death (03 §11 #1 asks whether to keep them across deaths as Boomerang Fu does). Power-ups spawn at arena-defined points on a seeded timer and from crates. Power-ups that give "extra boomerangs" are temporary projectiles, not held items — the one-boomerang rule is never bent (03 §5.4 Triple's phantoms).
 - **Teams** (later): a `team` field per player; kill rules consult it. Default is every player on their own team.
 
 ---
@@ -492,7 +502,7 @@ Decided in v2: mouse aim (yes), dash invulnerability (yes, 6 of 8 ticks), max on
 
 | Question | Default in this spec | Alternative |
 |---|---|---|
-| Hold-to-charge throws | Removed; fixed 14-tile range, mouse sets direction only (decided 2026-10-08). Holding the button instead hovers the boomerang at its stop and recalls it fast on release | Range from cursor distance was tried in the demo and dropped — throws stopped short unpredictably |
+| Hold-to-charge throws | Removed; fixed maximum 14-tile range, mouse sets direction only. A new hold stops it anywhere; release returns from zero speed | Range from cursor distance was tried in the demo and dropped — throws stopped short unpredictably |
 | Opponents' aim visibility | Facing chevron only | Full dotted line + reticle for everyone (maximum readability) |
 | Dash i-frame coverage | Boomerangs + melee, hazards opt-in | Boomerangs only |
 | Can shoves push players into pits? | Yes | Pits block all movement |
@@ -521,11 +531,11 @@ START_WINDUP_TICKS         = 5
 MELEE_SPEED_MULT           = 0.5
 INPUT_BUFFER_TICKS         = 6
 
-DASH_SPEED                 = 5.4    # 43 px over the 8 ticks; the slide after it is unchanged
+DASH_SPEED                 = 5.13   # 5% slower; 41.04 px over eight ticks
 DASH_TICKS                 = 8
 DASH_INVULN_TICKS          = 6
 DASH_COOLDOWN_TICKS        = 30
-DASH_SLIDE_SPEED           = 4
+DASH_SLIDE_SPEED           = 3.8
 DASH_SLIDE_FRICTION        = 0.93   # the walk is added on top of the slide, never replaces it
 DASH_SLIDE_MIN             = 0.2
 SHOVE_IMPULSE              = 4
@@ -546,13 +556,12 @@ MAX_HELD_BOOMERANGS        = 1
 
 BOOMERANG_RADIUS           = 10
 BOOMERANG_WALL_RADIUS      = 4
-BOOMERANG_SPEED            = 10
+BOOMERANG_SPEED            = 9.5
 BOOMERANG_DECEL            = SPEED² / (2·range + SPEED)   # per throw; 0.218 at 224 px
 BOOMERANG_HANG_TICKS       = 3
-BOOMERANG_HOVER_MAX_TICKS  = 90
+BOOMERANG_HOVER_MAX_TICKS  = 45
 BOOMERANG_RETURN_ACCEL     = BOOMERANG_DECEL
-BOOMERANG_RETURN_SPEED     = 12
-BOOMERANG_RECALL_SPEED     = 12
+BOOMERANG_RETURN_SPEED     = 11.4
 BOOMERANG_BRAKE            = 0.6
 BOOMERANG_TURN_RATE        = 0.16   # × speed
 BOOMERANG_TURN_RATE_NEAR   = 0.4    # × speed
@@ -562,7 +571,7 @@ BOOMERANG_MAX_FLIGHT_TICKS = 240
 BOOMERANG_CATCH_RADIUS     = 10
 BOOMERANG_PICKUP_RADIUS    = 8
 BOOMERANG_DROP_FRICTION    = 0.85
-DEFLECT_SPEED              = 7.5
+DEFLECT_SPEED              = 7.125
 DEFLECT_RANGE              = 112
 DEFLECT_GRACE              = 1
 BOOMERANG_SUBSTEP          = 8

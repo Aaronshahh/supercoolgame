@@ -6,6 +6,7 @@ import { CHARACTERS, CHAR_H, CHAR_W } from './characters.ts'
 import { BARREL, BOOMERANG, CRATE, DEBRIS, SHADOW_BOOM, SHADOW_DUDE, TORCH } from './props.ts'
 import { FONT, FONT_H, FONT_W } from './font.ts'
 import { CHAR_KEY, PROP_KEY } from './palette.ts'
+import { GLYPH_SIZE, POWER_GLYPHS, POWER_KEY } from './powerups.ts'
 
 let problems = 0
 
@@ -72,6 +73,26 @@ for (const c of CHARACTERS) {
     console.error(`${c.name}.runLift: ${c.runLift.length} entries for ${n} run frames`)
     problems++
   }
+  for (const [action, durations] of [['stand', c.idleTicks], ['run', c.runTicks], ['throw', c.throwTicks]] as const) {
+    if (!durations) continue
+    const frames=c[action]
+    if (durations.length !== frames.down.length || durations.some(n => !Number.isInteger(n) || n < 1)) {
+      console.error(`${c.name}.${action}: invalid authored frame holds`)
+      problems++
+    }
+    if (FACINGS.some(f => frames[f].length !== durations.length)) {
+      console.error(`${c.name}.${action}: facing lengths differ`)
+      problems++
+    }
+    if (action === 'throw' && durations.reduce((sum, n) => sum + n, 0) !== 24) {
+      console.error(`${c.name}.throw: frame holds must span the 24-tick throw animation`)
+      problems++
+    }
+  }
+  if (c.landingFrame !== undefined && (c.landingFrame < 0 || c.landingFrame >= n || c.runLift[c.landingFrame] !== 0)) {
+    console.error(`${c.name}: landing must name a grounded run pose`)
+    problems++
+  }
   if (!(c.runPeriod >= 1)) {
     console.error(`${c.name}.runPeriod: ${c.runPeriod}`)
     problems++
@@ -85,6 +106,9 @@ check('SHADOW_DUDE', SHADOW_DUDE, propChars, 10, 4)
 check('SHADOW_BOOM', SHADOW_BOOM, propChars, 6, 2)
 for (const [k, v] of Object.entries(DEBRIS)) check(`DEBRIS.${k}`, v, propChars)
 for (const [k, v] of Object.entries(FONT)) check(`FONT["${k}"]`, v, new Set(['#']), FONT_W, FONT_H)
+// power-up glyphs sit on a dark badge, so 'o' (the badge colour) must not appear inside one
+const powerChars = new Set(Object.keys(POWER_KEY).filter((c) => c !== 'o'))
+for (const [k, v] of Object.entries(POWER_GLYPHS)) check(`POWER_GLYPHS.${k}`, v, powerChars, GLYPH_SIZE, GLYPH_SIZE)
 
 if (problems) throw new Error(`${problems} art problem(s)`)
-console.log(`art ok: ${CHARACTERS.length} characters (${charFrames} frames), ${Object.keys(FONT).length} glyphs`)
+console.log(`art ok: ${CHARACTERS.length} characters (${charFrames} frames), ${Object.keys(FONT).length} glyphs, ${Object.keys(POWER_GLYPHS).length} power-up icons`)

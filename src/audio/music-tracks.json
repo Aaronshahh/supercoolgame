@@ -1,0 +1,92 @@
+[
+  {
+    "key": "cellar",
+    "title": "Stonework",
+    "reverb": [
+      1.2,
+      0.4
+    ],
+    "seconds": 51.2,
+    "file": "cellar-510ff8006a.mp3"
+  },
+  {
+    "key": "pits",
+    "title": "The Drop",
+    "reverb": [
+      2.2,
+      0.3
+    ],
+    "seconds": 54.857142857142854,
+    "file": "pits-1f482a5735.mp3"
+  },
+  {
+    "key": "greenhouse",
+    "title": "Undergrowth",
+    "reverb": [
+      1.6,
+      0.6
+    ],
+    "seconds": 51.2,
+    "file": "greenhouse-3a4913effe.mp3"
+  },
+  {
+    "key": "forge",
+    "title": "Hammerfall",
+    "reverb": [
+      0.9,
+      0.7
+    ],
+    "seconds": 54.857142857142854,
+    "file": "forge-bab92cfca3.mp3"
+  },
+  {
+    "key": "lab",
+    "title": "Containment Breach",
+    "reverb": [
+      0.8,
+      0.8
+    ],
+    "seconds": 45.714285714285715,
+    "file": "lab-57d93286e0.mp3"
+  },
+  {
+    "key": "armoury",
+    "title": "Seven Sharp",
+    "reverb": [
+      0.7,
+      0.6
+    ],
+    "seconds": 39.06977324263038,
+    "file": "armoury-68cb2f448a.mp3"
+  },
+  {
+    "key": "icebox",
+    "title": "Black Ice",
+    "reverb": [
+      2,
+      0.9
+    ],
+    "seconds": 38.4,
+    "file": "icebox-0685083881.mp3"
+  },
+  {
+    "key": "gatehouse",
+    "title": "Siege",
+    "reverb": [
+      2.5,
+      0.5
+    ],
+    "seconds": 60,
+    "file": "gatehouse-f3768c5f9b.mp3"
+  },
+  {
+    "key": "chapel",
+    "title": "Requiem",
+    "reverb": [
+      3.5,
+      0.5
+    ],
+    "seconds": 69.81818594104308,
+    "file": "chapel-a0b1c3bb81.mp3"
+  }
+]

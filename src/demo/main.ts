@@ -1,9 +1,16 @@
 /**
- * Visual style demo. Not the real simulation — a stand-in with the same feel
- * (60 Hz fixed step, spec constants) so the art and the hazards can be judged in motion.
+ * The game proper, grown out of the visual style demo: a stand-in simulation with the spec's feel
+ * (60 Hz fixed step, spec constants) and everything drawn round it. The shell (game/app.ts) imports
+ * this module and calls startGame() once, in one of three modes:
  *
- * Tab (or the < > arrows in the HUD) swaps the room for the next one in the roster, Shift+Tab for the
- * previous; everyone is re-seated at the new room's spawns and the URL follows.
+ *   practice  the demo as it stands: you and some bots in a roster room, Tab (or the < > arrows in
+ *             the HUD) swaps the room for the next one, Shift+Tab for the previous, everyone is
+ *             re-seated and the URL follows; B adds a bot; nobody keeps score for long
+ *   match     docs/01 §10 rounds: intro, play, round end, results; first to the target; 3/5/7 lives per round
+ *             (offline against bots with ?match=1, or online below)
+ *   online    a match driven by a lockstep session (net/lockstep.ts): every client steps the same
+ *             inputs on the same ticks, so the sim here must stay deterministic (no Math.random, no
+ *             Math.sin/cos, nothing read from the renderer)
  *
  * URL params: ?arena=<roster key from arenas.ts>|strip|floor|brawl (default: the roster's first room;
  *             the strip is the nine showroom rooms in a row, one per docs/02 theme, with the camera
@@ -14,24 +21,39 @@
  *             (until tick T) and throw along it at tick 10 (portal test), ?aim=dx,dy where the
  *             scripted cursor sits relative to the player (default 120,10), ?swap=K press Tab K times
  *             (negative: Shift+Tab) before the scripted scene runs, ?seed=N, ?light=0 to disable the lightmap,
- *             ?char=0-3 local character, ?bots=0-3 number of AI opponents (default 0),
- *             ?trace=1 per-tick log, ?sheet=1 (or sheet=all) shows every animation frame instead.
+ *             ?char=0-6 local character, ?bots=0-3 number of AI opponents (default 1; B / Shift+B
+ *             add / remove one while playing),
+ *             ?give=fire,triple hand the local player those power-ups at the start (and after every
+ *             room swap), ?powerups=0 stop pickups spawning,
+ *             ?trace=1 per-tick log, ?sheet=1 (or sheet=all) shows every animation frame instead,
+ *             ?shake=0 no screen shake and no blast flash, ?hitstop=0 no hold on kills (docs/04 §5).
  */
-import { CHARACTERS, type FacingFrames } from '../art/characters.ts'
+import { CHARACTERS, characterIndex, timedFrame, type FacingFrames } from '../art/characters.ts'
 import { CHAR_KEY, PAL, PLAYER_COLORS, PROP_KEY, darken, lighten, rgba, withPrimary } from '../art/palette.ts'
 import { BARREL, BOOMERANG, CRATE, SHADOW_BOOM, SHADOW_DUDE, TORCH } from '../art/props.ts'
+import { POWER_GLYPHS, POWER_KEY, badgeRows } from '../art/powerups.ts'
 import * as art from '../render/hazardArt.ts'
+import { Fx } from '../render/fx.ts'
+import * as part from '../render/powerupArt.ts'
 import { Lightmap, type Light } from '../render/lighting.ts'
 import { ctx2d, flipX, rotate90, silhouette, spriteFromRows, type Sprite } from '../render/pixelart.ts'
-import { createScreen } from '../render/screen.ts'
+import { createScreen, type Screen } from '../render/screen.ts'
 import { drawText, textWidth } from '../render/text.ts'
 import { TILE, TileKind, beltDir, isBelt, parseArena, redrawCells, renderArenaStatic, tileAt, type ArenaMap, type GrassAt } from '../render/tiles.ts'
-import { LOOKS, type Look } from '../render/looks.ts'
+import { LOOKS, type Ambient, type Look } from '../render/looks.ts'
 import { hash2, mulberry32 } from '../util/rng.ts'
+import { dcos, dsin } from '../util/trig.ts'
 import { ARENA_BRAWL, ARENA_FLOOR, ARENA_STRIP, type ArenaDef } from './arena.ts'
 import { ARENAS, ARENA_LIST, type ArenaEntry } from './arenas.ts'
 import { cyclePeriod, cyclePhase, railPos, type Cycle, type PhaseInfo, type Pt, type Rail, type RailPos } from './hazards.ts'
-import { sfxBeep, sfxBlast, sfxBump, sfxClank, sfxCreak, sfxCrunch, sfxThud, sfxWarp, unlockAudio } from './sfx.ts'
+import { POWERS, POWER_KINDS, isPowerKind, type PowerKind } from './powerups.ts'
+import { endFrame, engine, loadSamples, loop, music, setListener, sfx, stopLoops } from '../audio/index.ts'
+import { options, saveOptions } from '../game/options.ts'
+import { optionsItems } from '../game/optionsMenu.ts'
+import { Menu, drawPanel, type Item } from '../game/ui.ts'
+import { HASH_EVERY, type NetSession } from '../net/lockstep.ts'
+import { TEAM_NAMES } from '../game/roster.ts'
+import { roundLives, type Input, type RoomOrder, type MatchKind, type Team } from '../net/protocol.ts'
 
 // ---------------------------------------------------------------- constants
 const HUD_H = 14
@@ -53,12 +75,12 @@ const MELEE_SPEED_MULT = 0.5
 // sideways drifts, and pushing back holds you in place until the slide has dropped under walking
 // speed. (Aaron, 2026-10-08: punish obsessive dashing; 2026-10-09: the punishment is unwanted
 // movement, not a stop, and the walk has to compound with the slide, not wait for it.)
-const DASH_SLIDE_SPEED = 4
+const DASH_SLIDE_SPEED = 4 * 0.95
 const DASH_SLIDE_FRICTION = 0.93
 const DASH_SLIDE_MIN = 0.2 // below this the slide is dropped
 
-// 5.4 × 8 = 43.2 px: a hair under three tiles (Aaron, 2026-10-09: 10 % less roll, same slide after it)
-const DASH_SPEED = 5.4
+// Dash and its exit slide are 5% slower (2026-10-11). Duration and cooldown stay the same.
+const DASH_SPEED = 5.4 * 0.95
 const DASH_TICKS = 8
 const DASH_INVULN = 6
 const DASH_COOLDOWN = 30
@@ -75,9 +97,8 @@ const THROW_RANGE = 224 // fixed: every throw covers 14 tiles of path, wall boun
 const THROW_RECOVERY = 4
 const THROW_OFFSET = 8
 
-// Sprite animation lengths. Render-only: the sim timings above are what they were. Melee and the
-// dash roll take their frame from the state timer; these cover the throw and the catch, which are
-// instant in the sim.
+// Original action durations; the three new animals split the throw into uneven frame holds.
+// Visual recovery can continue after the combat state ends, and new input interrupts it.
 const THROW_FRAME = 8 // ticks per throw frame: release, follow-through, settle
 const THROW_ANIM = 3 * THROW_FRAME // three times the sim recovery on purpose: the pose is the point
 const CATCH_ANIM = 14 // clutch frame after a catch or a pickup
@@ -90,16 +111,16 @@ const ROLL_ANIM = 6 * ROLL_FRAME // longer than the dash itself; the roll finish
 // tossed straight up, so its position over time is a parabola. It hangs there, then accelerates back
 // at the same rate. Aaron asked for this (2026-10-08) over the measured Boomerang Fu profile of a
 // flat cruise and a hard brake (docs/notes-boomerang-fu-motion.md), which read as "moving at a
-// constant speed and then stopping". Holding the throw button keeps it hanging up there (a hover);
-// letting go recalls it at full speed from the first tick instead of the gradual return.
+// constant speed and then stopping". After the launch click, another hold stops it anywhere along
+// either leg of the flight. Releasing starts the return from rest, with the same acceleration.
 const BOOM_RADIUS = 10 // hit radius against players and melee swings (Aaron's number; generous next to the 11 px sprite)
 const BOOM_WALL_RADIUS = 4 // collision radius against walls; a little under the sprite so bounces hug the wall face
 const BOOM_SPRITE = 11 // the chevron sprite is BOOM_SPRITE square, drawn centred on the boomerang
-const BOOM_SPEED = 10 // launch speed; a full 224 px throw takes 46 ticks (0.77 s) to come to rest
+const BOOM_SPEED = 10 * 0.95 // 5% slower; range stays 224 px, so the parabola takes a little longer
 const BOOM_HANG = 3 // dead stop at the top of the throw before it turns back (the slow approach already reads as a pause)
-const BOOM_HOVER_MAX = 45 // the throw button held keeps it hanging up to this long (1.5 s)
-const BOOM_RETURN_SPEED = 12 // cap on the return; a regular return from full range arrives at ~10
-const BOOM_RECALL_SPEED = 12 // a hovered boomerang comes back at this speed from its first tick
+const BOOM_HOVER_BRAKE = 6 // 100 ms: a short glide to rest before hovering
+const BOOM_HOVER_MAX = 45 // the throw button held keeps it hanging up to this long (0.75 s)
+const BOOM_RETURN_SPEED = 12 * 0.95 // cap on the return; a regular return from full range arrives at ~10
 const BOOM_BRAKE = 0.6 // emergency decel once the bounce or flight cap is hit
 const BOOM_TURN = 0.16 // homing steer while returning, as a fraction of speed per tick
 const BOOM_TURN_NEAR = 0.4 // within BOOM_NEAR_DIST of the owner it bends hard to land the catch
@@ -107,10 +128,10 @@ const BOOM_NEAR_DIST = 48
 const BOOM_MAX_BOUNCES = 4
 const BOOM_MAX_FLIGHT = 240
 const CATCH_RADIUS = 10
-const CATCH_REACH = CATCH_RADIUS + 4 * BOOM_RETURN_SPEED // the owner reaches when the catch is ~4 ticks away
+const CATCH_REACH = CATCH_RADIUS + 4 * BOOM_RETURN_SPEED
 const PICKUP_RADIUS = 8
 const DROP_FRICTION = 0.85
-const DEFLECT_SPEED = 7.5
+const DEFLECT_SPEED = 7.5 * 0.95
 const DEFLECT_RANGE = 112
 const DEFLECT_GRACE = 1 // a swing still deflects (but no longer kills) for this many ticks after its active frames: 5-tick window vs 4, Aaron wanted ~20% more time
 const BOOM_SUBSTEP = 8 // max px of outbound movement per wall-collision test, so a fast boomerang cannot land inside a 16 px wall
@@ -134,7 +155,7 @@ const BOOM_HEIGHT = 6
 const BOOM_FIRE_TICKS = 60 // a boomerang that crossed a lit vent trails fire this long (render-only flag)
 
 const RESPAWN_TICKS = 90
-const SPAWN_PROTECT = 40
+const SPAWN_PROTECT = 120 // two seconds to escape a camper, including floor fire and shoves
 const ROUND_SECONDS = 60
 
 // Tiles and hazards (docs/02 §12). Cycles are off → warn → on, in ticks; "on" is the lethal or
@@ -174,10 +195,48 @@ const CHANDELIER_TRIGGER_RADIUS = 12
 const CHANDELIER_RESET = 900 // demo only: it is hoisted back up
 const CHANDELIER_FADE = 90 // the rubble's candles go out over this long
 const HAZARD_CREDIT_TICKS = 90 // a hazard kill goes to whoever shoved you within this long
+
+// Power-ups (docs/03 §12). Pickups land on the room's `p` points on a timer; a player holds up to
+// POWERUP_CAP, loses them all on death. Boomerang flags ride on the boomerang from the throw and
+// survive a steal; body power-ups work while held.
+const POWERUP_FIRST = 120 // ticks after a room loads before the first pickup is announced
+const POWERUP_INTERVAL = 480 // ticks between pickups (8 s)
+const POWERUP_MAX_ON_FIELD = 2 // no new pickup while this many are waiting to be taken
+const POWERUP_WARN = 45 // the point glows this long before the pickup lands on it
+const POWERUP_TTL = 900 // an untaken pickup fizzles after 15 s so the kinds keep rotating
+const POWERUP_PICK_RADIUS = 10
+const POWERUP_CAP = 3 // held at once; a fourth pushes out the oldest
+const CRATE_DROP_CHANCE = 0.25 // a broken crate drops a pickup this often
+const FIRE_TTL = 120 // ticks a fire tile burns (2 s)
+const FIRE_START = 24 // px of flight before the first fire or ice tile, so the thrower is never standing in it
+const FIRE_SPREAD = 20 // ticks between a burning grass tile catching its standing neighbours
+const ICE_TTL = 480 // ticks a laid ice tile lasts (8 s); it thins away over its last quarter
+const BIG_SCALE = 2 // hit radius and sprite of a big boomerang
+const TRIPLE_SPREAD = (20 * Math.PI) / 180 // the phantoms fly this far either side of the throw
+const SPEED_MULT = 1.35 // run speed cap with Speed
+const SPEED_DASH_CD = 15 // dash cooldown with Speed (30 without)
+const SHIELD_KB = 6 // the pop knocks you away from what hit you
+const SHIELD_GRACE = 20 // and gives you i-frames this long
+const BLINK_SQUASH_RADIUS = 8 // landing on someone when you blink flattens them
 const DARK_AMBIENT = 0.92 // lightmap darkness inside a dark zone (0.4 elsewhere)
 const CANDLE_AMBIENT = 0.55 // lightmap darkness in a room lit only by its chandeliers, all of them hanging; DARK_AMBIENT once they are all down
 const CAM_LERP = 0.12
-const SFX_RANGE = 400 // sounds further than this from the local player are not played
+
+// Juice and atmosphere (docs/04 §5–7). All of it is render-only: the simulation never sees any of
+// it, and the effects run on their own seeded rng (render/fx.ts) so the sim's stream is untouched.
+const HIT_FLASH = 2 // simulation ticks a killed body is drawn solid white
+const SHAKE_KILL = 2 // px of screen shake on a kill
+const SHAKE_BLAST = 4 // on a blast
+const SHAKE_LAND = 3 // on something heavy landing
+const SPAWN_DROP = 14 // ticks a respawning body takes to drop in from above and land
+const SPAWN_LAND = 3 // the last of those it spends squashed on the floor before standing up
+const SPAWN_HEIGHT = 40 // px above its spawn point the drop starts
+const BREATHE_PERIOD = 72 // ticks between idle breaths
+const BREATHE_DIP = 10 // ticks each breath holds the top of the body a pixel lower
+const BREATHE_FOLD = 0.45 // the breath folds this far down the visible body: head and shoulders above it move, the feet don't
+const FADE_IN = 20 // ticks a freshly loaded room takes to come up from black (live play only)
+const PRINT_TTL = 240 // ticks a footprint in the snow lasts
+const SCORCH_TTL = 3600 // ticks a blast's mark stays on the floor (a round)
 
 // ---------------------------------------------------------------- setup
 function reportError(msg: string) {
@@ -191,7 +250,7 @@ window.addEventListener('error', (e) => reportError(`${e.message}\n${e.error?.st
 window.addEventListener('unhandledrejection', (e) => reportError(String(e.reason)))
 
 const params = new URLSearchParams(location.search)
-const seed = Number(params.get('seed') ?? 7)
+let seed = Number(params.get('seed') ?? 7)
 const scriptedTicks = params.has('t') ? Number(params.get('t')) : -1
 // ?trace=1 logs every boomerang's state per scripted tick to the console (shot.sh echoes CONSOLE lines)
 const trace = params.get('trace') === '1'
@@ -200,20 +259,49 @@ const idle = params.get('idle') === '1'
 const push = params.has('push') ? params.get('push')!.split(',').map(Number) : null
 // ?walk=x,y[,T]: in the scripted scene, hold this direction from tick 0 (until tick T) and throw along it at tick 10
 const walk = params.has('walk') ? params.get('walk')!.split(',').map(Number) : null
+// ?hover=start,end;start,end: scripted holds, including release/re-hold during the return.
+const hoverWindows = params.has('hover') ? params.get('hover')!.split(';').map((s) => s.split(',').map(Number)) : null
 // ?aim=dx,dy: where the scripted cursor sits relative to the player
 const aimOff = params.has('aim') ? params.get('aim')!.split(',').map(Number) : [120, 10]
-let lightingOn = params.get('light') !== '0'
-const localChar = Math.min(3, Math.max(0, Number(params.get('char') ?? 0)))
+// ?light=0, ?shake=0, ?hitstop=0: the picture toggles (docs/04 §9) live in the saved options
+// (game/options.ts, read live so the pause menu's changes apply at once); a URL param overrides
+// them for this page without being saved
+if (params.get('light') === '0') options.lighting = false
+if (params.get('shake') === '0') options.shake = false
+if (params.get('hitstop') === '0') options.hitstop = false
+let localChar = params.has('char') ? characterIndex(Number(params.get('char'))) : options.char
 const sheet = params.get('sheet') // '1' = the local character's frames, 'all' = every character
 const startAt = params.get('at')?.split(',').map(Number) // c,r tile for the local player
+// ?give=fire,triple: power-ups the local player starts with (and gets back after a room swap)
+const giveList: PowerKind[] = (params.get('give') ?? '').split(',').filter(isPowerKind)
+const powerupsOn = params.get('powerups') !== '0'
 
-const rng = mulberry32(seed)
+let rng = mulberry32(seed)
+/** Particles, decals, shake and flash: render-only, on its own stream so the sim's rng is never touched. */
+let vfx = new Fx(seed * 7919 + 1)
+/** Shared death slowdown with a local camera view. */
+const DEATH_SLOW_TICKS = 18
+let deathSlowT = 0 // shared simulation ticks; every peer slows the same part of the fight
+let deathX = 0
+let deathY = 0
+let deathFrame: HTMLCanvasElement | null = null
+function gameSpeed(): number {
+  return deathSlowT > 0 ? 0.6 + 0.4 * Math.max(0, 1 - deathSlowT / 6) : 1
+}
+/** Crop the world only; aim input uses the inverse of this same view. */
+function deathView() {
+  const progress = 1 - deathSlowT / DEATH_SLOW_TICKS
+  const envelope = Math.min(1, progress / 0.18) * Math.min(1, (1 - progress) / 0.7)
+  const zoom = options.hitstop && deathSlowT > 0 ? 1 + 0.09 * envelope : 1
+  return { zoom, sx: Math.max(0, Math.min(W - W / zoom, deathX - camX - W / (2 * zoom))),
+    sy: Math.max(0, Math.min(WORLD_H - WORLD_H / zoom, deathY - WORLD_H / (2 * zoom))) }
+}
 /** A roster room by key (arenas.ts), else one of the demo layouts. */
 function pickDef(name: string): ArenaDef {
   return ARENAS[name] ?? (name === 'floor' ? ARENA_FLOOR : name === 'brawl' ? ARENA_BRAWL : ARENA_STRIP)
 }
 // the roster's first room unless asked otherwise; ?at= on its own means the strip, whose tiles it names
-const arenaName = params.get('arena') ?? (startAt ? 'strip' : ARENA_LIST[0].key)
+let arenaName = params.get('arena') ?? (startAt ? 'strip' : ARENA_LIST[0].key)
 // where we are in the roster, for cycling; -1 on the strip and the two old demo layouts
 let arenaIndex = ARENA_LIST.findIndex((a) => a.key === arenaName)
 /** The roster entry being played, if it is one (the strip and the old layouts have no entry). */
@@ -240,6 +328,25 @@ const cutList: number[] = []
 let crumbleStart!: Int32Array
 let crumbleGone!: Int32Array
 const crumbling: number[] = []
+// fire laid by a fire boomerang: the tick each tile caught (-1 not burning) and who lit it
+let fireAt!: Int32Array
+let fireBy!: Int16Array
+const fireList: number[] = []
+// ice laid by an ice boomerang: the tick each tile was coated (-1 bare) and who laid it
+let iceAt!: Int32Array
+let iceBy!: Int16Array
+const iceList: number[] = []
+/** A power-up on the floor: announced at its point for POWERUP_WARN ticks, then waiting to be taken. */
+interface Pickup {
+  kind: PowerKind
+  x: number
+  y: number
+  t: number // ticks since announced (warn) or since it landed (ready)
+  ready: boolean
+}
+const pickups: Pickup[] = []
+let nextPickupT = POWERUP_FIRST
+let lastPickupKind: PowerKind | null = null
 
 const grassLook: GrassAt = (c, r) => {
   const t = grassCut[r * arena.cols + c]
@@ -359,7 +466,17 @@ function loadArena(d: ArenaDef) {
   crumbleStart = new Int32Array(n).fill(-1)
   crumbleGone = new Int32Array(n).fill(-1)
   crumbling.length = 0
+  fireAt = new Int32Array(n).fill(-1)
+  fireBy = new Int16Array(n).fill(-1)
+  fireList.length = 0
+  iceAt = new Int32Array(n).fill(-1)
+  iceBy = new Int16Array(n).fill(-1)
+  iceList.length = 0
+  pickups.length = 0
+  nextPickupT = POWERUP_FIRST
   look = LOOKS[d.look ?? 'stone'] ?? LOOKS.stone
+  // the effects restart with the room on a stream of their own, so a still of any room is reproducible
+  vfx.reset(seed * 7919 + arena.cols * 131 + arena.rows)
   staticLayer = renderArenaStatic(arena, seed, grassLook, look)
   staticCtx = ctx2d(staticLayer)
 
@@ -511,7 +628,7 @@ function enterPortal(p: Player, hit: { portal: Portal; from: Mouth; to: Mouth },
   const { from, to } = hit
   const q = quarterTurns(from, to)
   spawnBurst(from.gx, from.gy, from.lit, 10, 1.4)
-  if (near(from.x) || near(to.x)) sfxWarp()
+  sfx('warp', closerX(from.x, to.x))
   ;[p.x, p.y] = exitPoint(from, to, p.x, p.y, PLAYER_RADIUS)
   ;[p.vx, p.vy] = rotQ(p.vx, p.vy, q)
   ;[p.slideX, p.slideY] = rotQ(p.slideX, p.slideY, q)
@@ -595,8 +712,13 @@ function blocksWalk(c: number, r: number): boolean {
 function inGrass(x: number, y: number): boolean {
   return kindAt(x, y) === TileKind.Grass && grassCut[idx(Math.floor(x / TILE), Math.floor(y / TILE))] < 0
 }
+/** Slippery underfoot: the room's own ice, or a coat laid by an ice boomerang (docs/03 §5.5). */
 function onIce(x: number, y: number): boolean {
-  return kindAt(x, y) === TileKind.Ice
+  if (kindAt(x, y) === TileKind.Ice) return true
+  const c = Math.floor(x / TILE)
+  const r = Math.floor(y / TILE)
+  if (c < 0 || r < 0 || c >= arena.cols || r >= arena.rows) return false
+  return iceAt[idx(c, r)] >= 0
 }
 function zoneName(x: number): string {
   const c = Math.floor(x / TILE)
@@ -675,6 +797,8 @@ const barrelSprite = spriteFromRows(BARREL, PROP_KEY, 'barrel')
 const torchFrames = TORCH.map((f) => spriteFromRows(f, PROP_KEY, 'torch'))
 const shadowDude = spriteFromRows(SHADOW_DUDE, PROP_KEY, 'shadow')
 const shadowBoom = spriteFromRows(SHADOW_BOOM, PROP_KEY, 'shadow')
+// power-up badges: the 7×7 glyph on a dark 9×9 tile; the pickup on the floor, the HUD and the stack over a head
+const powerIcons = Object.fromEntries(POWER_KINDS.map((k) => [k, spriteFromRows(badgeRows(POWER_GLYPHS[k]), POWER_KEY, k)])) as Record<PowerKind, Sprite>
 
 const silCache = new Map<Sprite, Map<string, Sprite>>()
 function sil(s: Sprite, color: string): Sprite {
@@ -683,6 +807,24 @@ function sil(s: Sprite, color: string): Sprite {
   let out = m.get(color)
   if (!out) m.set(color, (out = silhouette(s, color)))
   return out
+}
+
+/** The first row of a sprite with anything drawn in it (the slime is short; its body starts well down the frame). Cached. */
+const topCache = new WeakMap<Sprite, number>()
+function spriteTop(s: Sprite): number {
+  let top = topCache.get(s)
+  if (top === undefined) {
+    const px = s.img.getContext('2d')!.getImageData(0, 0, s.w, s.h).data
+    top = s.h
+    scan: for (let r = 0; r < s.h; r++)
+      for (let c = 0; c < s.w; c++)
+        if (px[(r * s.w + c) * 4 + 3] > 0) {
+          top = r
+          break scan
+        }
+    topCache.set(s, top)
+  }
+  return top
 }
 
 // ---------------------------------------------------------------- state
@@ -694,8 +836,11 @@ type Anim = 'none' | 'throw' | 'reach' | 'catch' | 'roll'
 
 interface Player {
   id: number
+  name: string // lobby name; empty in practice
   char: number
   color: number
+  kills: number // match mode: kills, for the podium's tie-break (docs/01 §10); the score counts rounds
+  gone: boolean // match mode: left the room; stays in the list so ids keep meaning, never acts again
   x: number
   y: number
   vx: number
@@ -718,13 +863,16 @@ interface Player {
   slideY: number
   windup: number // ticks spent running in place from a standstill
   held: boolean
-  holdThrow: boolean // this tick's throw-button-held input, read by the hanging boomerang
+  holdThrow: boolean // this tick's throw-button-held input, read by the airborne boomerang
   throwRec: number
   anim: Anim
   animT: number
   dashCd: number
   invuln: number
+  spawnProtect: number
+  team: Team
   respawnT: number
+  lives: number // remaining lives, including the current one; refilled each round
   spawnX: number
   spawnY: number
   score: number
@@ -733,6 +881,8 @@ interface Player {
   lastShoveT: number
   plat: number // platform we stood on at the end of last tick, or -1
   turn: { ix: number; iy: number; q: number } | null // after a portal: the stick as held going in, and the quarter turns it is read through (throughTurn)
+  powers: PowerKind[] // held power-ups, oldest first; at most POWERUP_CAP; cleared on death
+  spawnT: number // render-only: ticks left of the drop-in after a (re)spawn; the body is in the air above SPAWN_LAND
   ai: { tx: number; ty: number; retarget: number; throwT: number } | null
 }
 
@@ -748,7 +898,11 @@ interface Boomerang {
   range: number
   traveled: number
   decel: number // speed lost per outbound tick, set at launch so it comes to rest at the end of its range
-  recall: boolean // it hovered, so it comes back at full speed rather than accelerating out of the hang
+  hovering: boolean // braking/hover active; release returns once at rest, without the endpoint pause
+  hoverReady: boolean // launch click has been released
+  hoverUsed: boolean // one hover for the entire throw, even after a deflect
+  hoverReleased: boolean // release during braking also commits to the return
+  brakeT: number // ticks left to ease down to zero; never changes normal return acceleration
   hangT: number // ticks spent hanging so far
   armed: boolean // set by deflecting your own boomerang: it blows up at the end of its flight instead of returning
   fire: number // ticks of fire trail left after crossing a lit vent (render-only)
@@ -757,18 +911,14 @@ interface Boomerang {
   spin: number
   trail: { x: number; y: number }[]
   hit: Set<number>
+  powers: Set<PowerKind> // the thrower's boomerang flags, fixed at the throw; a steal keeps them
+  phantom: boolean // one of a triple's side copies: kills, is deflectable (pops), never hangs, returns or drops
+  lastTile: number // tile index the fire trail last lit, so each tile is lit once as it crosses
 }
 
-interface Particle {
-  x: number
-  y: number
-  vx: number
-  vy: number
-  ttl: number
-  max: number
-  color: string
-}
+// Particles, rings and floor marks live in render/fx.ts (`vfx`); these are the sprite-based effects.
 
+/** The two halves of a sliced body: drawn solid white for their first HIT_FLASH ticks (docs/01 §8). */
 interface Half {
   s: Sprite
   sx: number
@@ -783,12 +933,14 @@ interface Half {
   max: number
 }
 
+/** A body sinking into the floor: a fall, a burn or a squash. `flash`: it was hit, so it flashes white first. */
 interface Sink {
   s: Sprite
   x: number
   y: number
   ttl: number
   max: number
+  flash: boolean
 }
 
 interface Afterimage {
@@ -818,35 +970,56 @@ interface Blast {
   max: number
 }
 
-/** A dab of slime left on the floor behind a crawling character; fades out, never moves. */
-interface Smear {
-  x: number
-  y: number
-  w: number
-  ttl: number
-  max: number
-  color: string
-}
-
 const players: Player[] = []
 let booms: Boomerang[] = []
-let particles: Particle[] = []
 let halves: Half[] = []
 let sinks: Sink[] = []
 let afterimages: Afterimage[] = []
 let slashes: Slash[] = []
 let blasts: Blast[] = []
-let smears: Smear[] = []
 const eventLog: string[] = []
 
-function makePlayer(id: number, char: number, color: number, ai: boolean): Player {
-  const sp = arena.spawns[id] ?? arena.spawns[0] ?? { c: 3, r: 3 }
-  const x = sp.c * TILE + 8
-  const y = sp.r * TILE + 8
+/** The slot of the player this browser controls: whose camera, aim line, HUD marker and sounds. */
+let localId = 0
+function local(): Player {
+  return playerById(localId) ?? players[0]
+}
+function playerById(id: number): Player | undefined {
+  for (const p of players) if (p.id === id) return p
+  return undefined
+}
+/** Which spawn point each player id takes this round: its own in practice, a seeded shuffle in a match (docs/01 §10). */
+let spawnOrder: number[] = []
+function spawnFor(id: number): Pt {
+  const sp = arena.spawns[spawnOrder[id] ?? id] ?? arena.spawns[0] ?? { c: 3, r: 3 }
+  return { x: sp.c * TILE + 8, y: sp.r * TILE + 8 }
+}
+function shuffleSpawns() {
+  const order = arena.spawns.map((_, i) => i)
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1))
+    ;[order[i], order[j]] = [order[j], order[i]]
+  }
+  if (match.gameMode === 'teams') {
+    // Keep teammates on the same side, with seeded side swaps and spawn choices each round.
+    order.sort((a, b) => arena.spawns[a].c - arena.spawns[b].c)
+    const ends = [order.slice(0, 2), order.slice(-2)]
+    const swap = rng() < 0.5 ? 0 : 1
+    const used = [0, 0]
+    spawnOrder = []
+    for (const p of players) spawnOrder[p.id] = ends[p.team ^ swap][used[p.team]++]
+  } else spawnOrder = order
+}
+
+function makePlayer(id: number, char: number, color: number, ai: boolean, name = '', team: Team = (id % 2) as Team): Player {
+  const { x, y } = spawnFor(id)
   return {
     id,
+    name,
     char,
     color,
+    kills: 0,
+    gone: false,
     x,
     y,
     vx: 0,
@@ -875,7 +1048,10 @@ function makePlayer(id: number, char: number, color: number, ai: boolean): Playe
     animT: 0,
     dashCd: 0,
     invuln: 0,
+    spawnProtect: 0,
+    team,
     respawnT: 0,
+    lives: 3,
     spawnX: x,
     spawnY: y,
     score: 0,
@@ -884,38 +1060,183 @@ function makePlayer(id: number, char: number, color: number, ai: boolean): Playe
     lastShoveT: -9999,
     plat: -1,
     turn: null,
+    powers: [],
+    spawnT: SPAWN_DROP,
     ai: ai ? { tx: x, ty: y, retarget: 0, throwT: 60 + Math.floor(rng() * 120) } : null,
   }
 }
 
-players.push(makePlayer(0, localChar, 0, false))
-if (startAt && startAt.length === 2 && startAt.every((n) => Number.isFinite(n))) {
-  const p0 = players[0]
-  p0.x = p0.spawnX = startAt[0] * TILE + 8
-  p0.y = p0.spawnY = startAt[1] * TILE + 8
-  p0.cursorX = p0.x + 60
-  p0.cursorY = p0.y
+/** Practice: you and the bots the URL asks for (startGame; a match gets its roster from the lobby instead). */
+function seatPracticePlayers() {
+  players.push(makePlayer(0, localChar, 0, false))
+  if (startAt && startAt.length === 2 && startAt.every((n) => Number.isFinite(n))) {
+    const p0 = players[0]
+    p0.x = p0.spawnX = startAt[0] * TILE + 8
+    p0.y = p0.spawnY = startAt[1] * TILE + 8
+    p0.cursorX = p0.x + 60
+    p0.cursorY = p0.y
+  }
+  // one sparring bot by default (Aaron, 2026-10-09: "add a bot in the demo so i can test play");
+  // ?bots=0 clears the floor for feel-testing, ?bots=2-3 for a crowd; B / Shift+B change it live.
+  // Scripted stills (?t=) stay empty unless they ask, so the existing shots don't change.
+  const botCount = Math.min(3, Math.max(0, Number(params.get('bots') ?? (scriptedTicks >= 0 ? 0 : 1)) || 0))
+  for (let i = 1; i <= botCount; i++) players.push(makePlayer(i, (i + localChar) % CHARACTERS.length, i, true))
 }
-// bots are off by default so the floor is free for feel-testing; ?bots=1-3 brings them back
-const botCount = Math.min(3, Math.max(0, Number(params.get('bots') ?? 0) || 0))
-for (let i = 1; i <= botCount; i++) players.push(makePlayer(i, (i + localChar) % 4, i, true))
 
-/** True when a sound at world x is close enough to the local player to be worth playing. */
-function near(x: number): boolean {
-  return Math.abs(x - players[0].x) < SFX_RANGE
+/** B: another bot joins at the next free spawn, up to three. */
+function addBot() {
+  if (players.length >= 4) return
+  const id = players.length
+  const p = makePlayer(id, (id + localChar) % CHARACTERS.length, id, true)
+  p.invuln = SPAWN_PROTECT
+  p.spawnProtect = SPAWN_PROTECT
+  players.push(p)
+  eventLog.push(`t${tick} bot P${id} joined`)
+}
+
+/** Shift+B: the last bot leaves, taking its boomerang and any credit it was owed with it. */
+function removeBot() {
+  const p = players[players.length - 1]
+  if (!p?.ai) return
+  players.pop()
+  booms = booms.filter((b) => b.owner !== p.id)
+  for (const i of fireList) if (fireBy[i] === p.id) fireBy[i] = -1
+  for (const i of iceList) if (iceBy[i] === p.id) iceBy[i] = -1
+  for (const q of players) if (q.lastShover === p.id) q.lastShover = -1
+  vfx.smoke(p.x, p.y, 6, '#2a2230', 6, 4)
+  eventLog.push(`t${tick} bot P${p.id} left`)
+}
+
+/** Of two world x positions (a portal's two mouths, a blink's two ends), the one nearer the local player: where its one sound plays. */
+function closerX(a: number, b: number): number {
+  const lx = local().x
+  return Math.abs(a - lx) <= Math.abs(b - lx) ? a : b
+}
+
+/** True when world x is on screen, give or take `m` px: shake, flash and the ambient spawns only bother with what you can see. */
+function inView(x: number, m = 40): boolean {
+  const x0 = scriptedTicks >= 0 ? camTarget() : camX
+  return x > x0 - m && x < x0 + W + m
+}
+
+/** Screen shake from something at world x, if it is on screen and the toggle is on. */
+function shakeAt(x: number, mag: number, ticks: number) {
+  if (options.shake && inView(x, 80)) vfx.shake(mag, ticks)
+}
+
+/** A white flash over the world from something at world x (blasts), under the same toggle as the shake. */
+function flashAt(x: number, a: number, ticks: number) {
+  if (options.shake && inView(x, 80)) vfx.flash(a, ticks)
+}
+
+/** The feet mark the floor (docs/04 §6): prints in snow, scratches on ice, a puff of dust anywhere else. */
+function footsteps(p: Player, ice: boolean) {
+  if (!p.moving || !showsWalk(p) || p.state === 'dash' || inGrass(p.x, p.y)) return
+  const sp = len(p.vx, p.vy)
+  if (sp < 0.3) return
+  const ux = p.vx / sp
+  const uy = p.vy / sp
+  if (ice) {
+    if (p.walkT % 8 === 0) vfx.decal('scratch', p.x + (vfx.rng() - 0.5) * 4, p.y + 1, PAL.iceCrack, { w: 3, dx: ux, dy: uy * 0.6, ttl: 300 })
+    return
+  }
+  if (p.walkT % 8 !== 0) return
+  const side = (p.walkT >> 3) & 1 ? 2 : -2 // left foot, right foot
+  if (look.prints) vfx.decal('print', p.x - uy * side, p.y + ux * side * 0.5, look.prints, { w: 2, h: 1, ttl: PRINT_TTL })
+  else vfx.dust(p.x - ux * 2, p.y - uy * 2, 1, look.dust, 0.3)
+}
+
+/**
+ * The room's air (docs/04 §6): what the look says drifts through it, plus what its fixtures give
+ * off: torches, lit vents, burning floor, running saws and carts, portal mouths, candles. All of it
+ * render-only and spawned over the visible columns alone, from vfx's own random stream.
+ */
+function stepAtmosphere() {
+  const x0 = scriptedTicks >= 0 ? camTarget() : camX
+  const c0 = Math.max(0, Math.floor(x0 / TILE))
+  const c1 = Math.min(arena.cols - 1, Math.floor((x0 + W - 1) / TILE))
+  const cols = c1 - c0 + 1
+  const area = (cols * arena.rows) / (36 * 19)
+  for (const a of look.ambient) {
+    const want = (a.rate / 60) * area
+    let n = Math.floor(want)
+    if (vfx.rng() < want - n) n++
+    for (let k = 0; k < n; k++) {
+      for (let tries = 0; tries < 8; tries++) {
+        const c = c0 + Math.floor(vfx.rng() * cols)
+        const r = Math.floor(vfx.rng() * arena.rows)
+        const i = idx(c, r)
+        const t = arena.tiles[i]
+        const x = c * TILE + vfx.rng() * TILE
+        let y = r * TILE + vfx.rng() * TILE
+        if (a.where === 'floor' || a.where === 'anywhere') {
+          if (t === TileKind.Pit || (a.where === 'floor' && t === TileKind.Wall)) continue
+        } else if (a.where === 'wall') {
+          // the open tile under a wall: leaves off the canopy, grit off the brick, steam from a seam
+          if (t === TileKind.Wall || t === TileKind.Pit || r === 0 || arena.tiles[idx(c, r - 1)] !== TileKind.Wall) continue
+          y = r * TILE + 1 + vfx.rng() * 3
+        } else if (t !== TileKind.Grass || grassCut[i] >= 0) continue
+        vfx.ambient(a.kind, x, y, a.colors[Math.floor(vfx.rng() * a.colors.length)])
+        break
+      }
+    }
+  }
+  // torches: an ember off the flame now and then, a thread of smoke less often
+  arena.props.forEach((pr, i) => {
+    if (pr.kind !== 'torch' || !inView(pr.c * TILE)) return
+    const x = pr.c * TILE + 7
+    const y = pr.r * TILE + 16
+    if ((tick + i * 7) % 18 === 0) vfx.embers(x, y, 1, 10, 2)
+    if ((tick + i * 13) % 80 === 0) vfx.smoke(x, y, 1, '#3a3038', 13, 1)
+  })
+  // lit vents spit; burning floor lifts embers and the odd puff of smoke
+  for (let r = 0; r < arena.rows; r++)
+    for (let c = c0; c <= c1; c++) {
+      if (arena.tiles[idx(c, r)] !== TileKind.Vent || phaseOf(TileKind.Vent, c, r).phase !== 'on') continue
+      if ((tick + c) % 3 === 0) vfx.embers(c * TILE + 4 + vfx.rng() * 8, r * TILE + 8, 1, 12, 3, PAL.flameY)
+    }
+  for (const i of fireList) {
+    const c = i % arena.cols
+    const r = (i - c) / arena.cols
+    if (!inView(c * TILE)) continue
+    if (vfx.rng() < 0.25) vfx.embers(c * TILE + 2 + vfx.rng() * 12, r * TILE + 2 + vfx.rng() * 12, 1, 6, 2)
+    if (vfx.rng() < 0.03) vfx.smoke(c * TILE + 8, r * TILE + 8, 1, '#2a2230', 12, 3)
+  }
+  // moving hazards: a running saw throws sparks, a boulder raises dust, a cart's wheels spark on the rail
+  for (const cr of crushers) {
+    if (!cr.pos.moving || !inView(cr.pos.x)) continue
+    if (cr.look === 'saw' && tick % 2 === 0) vfx.sparks(cr.pos.x - cr.pos.dx * 6, cr.pos.y + 2, PAL.flameY, 1, 1.2, 2, -cr.pos.dx, -cr.pos.dy)
+    if (cr.look === 'boulder' && tick % 3 === 0) vfx.dust(cr.pos.x - cr.pos.dx * 8, cr.pos.y + 6 - cr.pos.dy * 8, 1, look.dust, 0.5, -cr.pos.dx, -cr.pos.dy)
+  }
+  for (const ct of carts) {
+    if (!ct.pos.moving || !inView(ct.pos.x)) continue
+    if (tick % 5 === 0) vfx.sparks(ct.pos.x - ct.pos.dx * CART_HALF_W, ct.pos.y + CART_HALF_H - 1, PAL.flameY, 1, 0.8, 0, -ct.pos.dx, 0)
+  }
+  // portal mouths breathe motes of their colour
+  for (const po of portals)
+    for (const m of po.ends) {
+      if (!inView(m.x)) continue
+      if ((tick + m.c * 3) % 12 === 0) vfx.ambient('mote', m.x + m.nx * 3 + (vfx.rng() - 0.5) * 8, m.y + m.ny * 3 + (vfx.rng() - 0.5) * 4, m.col)
+    }
+  // candles: hanging chandeliers give off wisps of smoke; the fallen ones smoulder for a while
+  for (const ch of chandeliers) {
+    if (!inView(ch.x)) continue
+    if (ch.state === 'hang' || ch.state === 'creak') {
+      if ((tick + ch.x) % 16 === 0) vfx.ambient('wisp', ch.x + (vfx.rng() - 0.5) * 12, ch.y - CHANDELIER_HEIGHT + 2, '#3a3038')
+    } else if (ch.state === 'rubble' && ch.t < CHANDELIER_FADE / 2) {
+      if (vfx.rng() < 0.08) vfx.embers(ch.x + (vfx.rng() - 0.5) * 12, ch.y + (vfx.rng() - 0.5) * 6, 1, 2, 1)
+      if (vfx.rng() < 0.04) vfx.smoke(ch.x, ch.y, 1, '#2a2230', 4, 4)
+    }
+  }
+  // a power-up waiting on the floor glints
+  for (const pk of pickups) {
+    if (!pk.ready || !inView(pk.x)) continue
+    if ((tick + Math.round(pk.x)) % 36 === 0) vfx.sparks(pk.x + (vfx.rng() - 0.5) * 8, pk.y, POWERS[pk.kind].color, 1, 0.3, 8)
+  }
 }
 
 // ---------------------------------------------------------------- input
-interface Input {
-  mx: number
-  my: number
-  throw: boolean
-  melee: boolean
-  dash: boolean
-  hold: boolean // throw button currently down: keeps a hanging boomerang hovering
-  cursorX: number
-  cursorY: number
-}
+// The Input shape is the wire format's (net/protocol.ts): what a player does in one tick.
 
 const keys = new Set<string>()
 let mouseX = W / 2
@@ -927,43 +1248,168 @@ let dashQueued = false
 // where the HUD draws the room label and its < > arrows, so a click on it cycles the roster
 let hudArenaBox = { x0: 0, x1: 0 }
 
-const mount = document.getElementById('game')!
-const screen = createScreen(W, H, mount)
+let screen!: Screen
 
-window.addEventListener('keydown', (e) => {
-  if (e.repeat) return
-  unlockAudio()
-  keys.add(e.code)
-  if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') dashQueued = true
-  if (e.code === 'KeyF') meleeQueued = true
-  if (e.code === 'KeyL') lightingOn = !lightingOn
-  if (e.code >= 'Digit1' && e.code <= 'Digit4') players[0].char = Number(e.code[5]) - 1
-  if (e.code === 'Tab') switchArena(e.shiftKey ? -1 : 1)
-  if (e.code === 'Space' || e.code === 'Tab') e.preventDefault()
-})
-window.addEventListener('keyup', (e) => keys.delete(e.code))
-window.addEventListener('mousemove', (e) => {
-  ;[mouseX, mouseY] = screen.toInternal(e.clientX, e.clientY)
-})
-window.addEventListener('mousedown', (e) => {
-  unlockAudio()
-  const [mx, my] = screen.toInternal(e.clientX, e.clientY)
-  // a click on the room label in the HUD cycles the roster (left half back, right half on), not a throw
-  if (e.button === 0 && my < HUD_H && mx >= hudArenaBox.x0 && mx <= hudArenaBox.x1) {
-    switchArena(mx < (hudArenaBox.x0 + hudArenaBox.x1) / 2 ? -1 : 1)
+function installListeners() {
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return
+    engine.unlock()
+    if (e.code === 'Escape') {
+      e.preventDefault()
+      toggleOverlay()
+      return
+    }
+    if (overlay) {
+      // a menu is up: it gets the keys, the player does not
+      if (overlay.menu.key(e)) e.preventDefault()
+      return
+    }
+    keys.add(e.code)
+    if (e.code === 'Space' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') dashQueued = true
+    if (e.code === 'KeyF') meleeQueued = true
+    if (e.code === 'KeyL') {
+      options.lighting = !options.lighting
+      saveOptions()
+    }
+    if (e.code === 'KeyM') {
+      options.mute = !engine.isMuted
+      engine.setMuted(options.mute)
+      saveOptions()
+    }
+    if (e.code === 'Enter' || e.code === 'NumpadEnter') requestRematch()
+    if (!match.on) {
+      // practice only: the room, the bots and the costume are yours to change
+      if (/^Digit[1-7]$/.test(e.code)) local().char = Number(e.code[5]) - 1
+      if (e.code === 'Tab') switchArena(e.shiftKey ? -1 : 1)
+      if (e.code === 'KeyB') e.shiftKey ? removeBot() : addBot()
+    }
+    if (e.code === 'Space' || e.code === 'Tab') e.preventDefault()
+  })
+  window.addEventListener('keyup', (e) => keys.delete(e.code))
+  window.addEventListener('blur', () => {
+    // alt-tabbing away with a key down would leave the player running
+    keys.clear()
+    mouseDown = [false, false, false]
+  })
+  window.addEventListener('mousemove', (e) => {
+    ;[mouseX, mouseY] = screen.toInternal(e.clientX, e.clientY)
+    overlay?.menu.mouseMove(mouseX, mouseY)
+  })
+  window.addEventListener('mousedown', (e) => {
+    engine.unlock()
+    const [mx, my] = screen.toInternal(e.clientX, e.clientY)
     e.preventDefault()
+    if (overlay) {
+      if (e.button === 0) overlay.menu.click(mx, my)
+      return
+    }
+    // a click on the room label in the HUD cycles the roster (left half back, right half on), not a throw
+    if (!match.on && e.button === 0 && my < HUD_H && mx >= hudArenaBox.x0 && mx <= hudArenaBox.x1) {
+      switchArena(mx < (hudArenaBox.x0 + hudArenaBox.x1) / 2 ? -1 : 1)
+      return
+    }
+    mouseDown[e.button] = true
+    if (e.button === 0) throwQueued = true
+    if (e.button === 2) meleeQueued = true
+    if (e.button === 1) dashQueued = true
+  })
+  window.addEventListener('mouseup', (e) => {
+    mouseDown[e.button] = false
+  })
+  window.addEventListener('contextmenu', (e) => e.preventDefault())
+}
+
+// Audio (docs/07). Everything waits for the first key or click (engine.unlock above); a scripted
+// run never makes one, so headless stills stay silent and deterministic. ?mute=1 starts muted,
+// ?music=0 / ?sfx=0 drop a bus. The shell has usually unlocked the engine and started the music
+// already (the menu plays the Cellar theme); both calls are safe to repeat.
+function initAudio() {
+  if (params.get('mute') === '1') engine.setMuted(true)
+  if (params.get('music') === '0') engine.setMusicOn(false)
+  if (params.get('sfx') === '0') engine.setSfxOn(false)
+  music.playRoom(arenaEntry()?.key ?? 'cellar')
+  engine.onUnlock(loadSamples)
+  // ?audio=test: the headless smoke test (scripts/audio-smoke.sh) unlocks without a gesture and plays everything once
+  if (params.get('audio') === 'test') void import('../audio/smoke.ts').then(m => m.runAudioSmoke())
+}
+
+// ---------------------------------------------------------------- pause / leave menu
+interface Overlay {
+  title: string
+  menu: Menu
+  lines?: string[]
+  w?: number
+}
+let overlay: Overlay | null = null
+/** Practice and an offline match stop the sim while a menu is up; an online match cannot (the others play on). */
+let paused = false
+
+function toggleOverlay() {
+  if (overlay) {
+    closeOverlay()
     return
   }
-  mouseDown[e.button] = true
-  if (e.button === 0) throwQueued = true
-  if (e.button === 2) meleeQueued = true
-  if (e.button === 1) dashQueued = true
-  e.preventDefault()
-})
-window.addEventListener('mouseup', (e) => {
-  mouseDown[e.button] = false
-})
-window.addEventListener('contextmenu', (e) => e.preventDefault())
+  overlay = net ? leaveMenu() : pauseMenu()
+  paused = !net
+  keys.clear()
+  mouseDown = [false, false, false]
+}
+function closeOverlay() {
+  overlay = null
+  paused = false
+}
+function optionsOverlay(back: () => Overlay): Overlay {
+  return { title: 'OPTIONS', menu: new Menu(optionsItems(() => (overlay = back()))), w: 210 }
+}
+function pauseMenu(): Overlay {
+  const items: Item[] = [
+    { kind: 'button', label: 'RESUME', onSelect: closeOverlay },
+    { kind: 'button', label: 'OPTIONS', onSelect: () => (overlay = optionsOverlay(pauseMenu)) },
+    { kind: 'button', label: 'QUIT TO MENU', onSelect: quitToMenu, color: PAL.red },
+  ]
+  return { title: match.on ? 'PAUSED' : 'PRACTICE', menu: new Menu(items) }
+}
+function leaveMenu(): Overlay {
+  const items: Item[] = [
+    { kind: 'button', label: 'STAY', onSelect: closeOverlay },
+    { kind: 'button', label: 'OPTIONS', onSelect: () => (overlay = optionsOverlay(leaveMenu)) },
+    { kind: 'button', label: 'LEAVE', onSelect: quitToMenu, color: PAL.red },
+  ]
+  return { title: 'LEAVE THE MATCH?', lines: ['THE OTHERS PLAY ON WITHOUT YOU'], menu: new Menu(items) }
+}
+/** Back to the main menu. This module keeps its state at module level and is not re-entrant, so the way back is a fresh page. */
+function quitToMenu() {
+  net?.close()
+  const u = new URL(location.href)
+  const signal = u.searchParams.get('signal')
+  u.search = signal ? `?signal=${encodeURIComponent(signal)}` : ''
+  u.hash = ''
+  location.assign(u.toString())
+}
+
+function drawOverlay() {
+  if (!overlay) return
+  const rowH = 12
+  const w = overlay.w ?? 150
+  const lines = overlay.lines ?? []
+  const hasHint = overlay.menu.items.some((it) => it.hint)
+  const menuH = overlay.menu.items.reduce((a, it) => a + (it.kind === 'gap' ? rowH / 2 : rowH), 0)
+  const h = 20 + lines.length * 8 + menuH + (hasHint ? 14 : 8)
+  const x = Math.round(W / 2 - w / 2)
+  const y = Math.round(HUD_H + WORLD_H / 2 - h / 2)
+  ctx.fillStyle = rgba(PAL.outline, 0.55)
+  ctx.fillRect(0, HUD_H, W, WORLD_H)
+  drawPanel(ctx, x, y, w, h, 0.94)
+  drawText(ctx, overlay.title, Math.round(W / 2 - textWidth(overlay.title) / 2), y + 7, PAL.bone)
+  let ly = y + 17
+  for (const l of lines) {
+    drawText(ctx, l, Math.round(W / 2 - textWidth(l) / 2), ly, PAL.hudDim)
+    ly += 8
+  }
+  overlay.menu.draw(ctx, x + 6, ly + 3, w - 12, { rowH, valueW: 70 })
+  const hint = overlay.menu.hint()
+  if (hint) drawText(ctx, hint, Math.round(W / 2 - textWidth(hint) / 2), y + h - 10, PAL.hudDim)
+}
 
 // camera: world x of the left edge of the view; follows the local player along the strip
 let camX = 0
@@ -975,6 +1421,7 @@ function readLocalInput(): Input {
   if (keys.has('KeyD') || keys.has('ArrowRight')) mx += 1
   if (keys.has('KeyW') || keys.has('ArrowUp')) my -= 1
   if (keys.has('KeyS') || keys.has('ArrowDown')) my += 1
+  const view = deathView()
   const inp: Input = {
     mx,
     my,
@@ -982,8 +1429,8 @@ function readLocalInput(): Input {
     melee: meleeQueued,
     dash: dashQueued,
     hold: mouseDown[0],
-    cursorX: mouseX + camX,
-    cursorY: mouseY - HUD_H,
+    cursorX: view.sx + mouseX / view.zoom + camX,
+    cursorY: view.sy + (mouseY - HUD_H) / view.zoom,
   }
   throwQueued = meleeQueued = dashQueued = false
   return inp
@@ -991,8 +1438,9 @@ function readLocalInput(): Input {
 
 /** Deterministic input for screenshot mode. */
 function scriptedInput(t: number, p: Player): Input {
-  // the second throw is held down: it hovers at the top of its flight, then is recalled
-  const inp: Input = { mx: 0, my: 0, throw: false, melee: false, dash: false, hold: !idle && t >= 222 && t < 290, cursorX: p.x + aimOff[0], cursorY: p.y + aimOff[1] }
+  // The second throw is stopped in mid-flight, then returns smoothly when released.
+  const hold = hoverWindows?.some(([start, end]) => t >= start && t < end)
+  const inp: Input = { mx: 0, my: 0, throw: false, melee: false, dash: false, hold: !idle && (hold ?? (t >= 240 && t < 270)), cursorX: p.x + aimOff[0], cursorY: p.y + aimOff[1] }
   if (idle) return inp
   if (walk) {
     // portal test: walk one way and throw along it
@@ -1003,7 +1451,7 @@ function scriptedInput(t: number, p: Player): Input {
     inp.cursorX = p.x + walk[0] * 120
     inp.cursorY = p.y + walk[1] * 120
     inp.throw = t === 10
-    inp.hold = false
+    inp.hold = hold ?? false
     return inp
   }
   if (push && t >= 96) {
@@ -1090,20 +1538,9 @@ function moveY(p: { x: number; y: number }, dy: number, r: number, test: (c: num
   return true
 }
 
+/** A puff of pixels (the all-purpose effect). Render-only: it draws on the effects' own rng, never the sim's. */
 function spawnBurst(x: number, y: number, color: string, n: number, speed: number) {
-  for (let i = 0; i < n; i++) {
-    const a = rng() * Math.PI * 2
-    const s = speed * (0.4 + rng() * 0.8)
-    particles.push({
-      x,
-      y,
-      vx: Math.cos(a) * s,
-      vy: Math.sin(a) * s - 0.5,
-      ttl: 18 + Math.floor(rng() * 16),
-      max: 30,
-      color: rng() < 0.3 ? PAL.white : color,
-    })
-  }
+  vfx.burst(x, y, color, n, speed)
 }
 
 /** True when the plain stand/run frame is what's on screen (so the run lift and held overlay apply). */
@@ -1115,7 +1552,7 @@ function showsWalk(p: Player): boolean {
 function runFrame(p: Player): number {
   if (!p.moving) return 0
   const art = CHARACTERS[p.char]
-  return Math.floor(p.walkT / art.runPeriod) % art.run.down.length
+  return art.runTicks ? timedFrame(p.walkT, art.runTicks) : Math.floor(p.walkT / art.runPeriod) % art.run.down.length
 }
 
 /** Pixels the body is drawn above its shadow on the current run frame (the frog's hop, the shroom's bob). */
@@ -1126,6 +1563,7 @@ function runLift(p: Player): number {
 
 function playerSprite(p: Player): Sprite {
   const set = charSets[p.char][p.color]
+  const art = CHARACTERS[p.char]
   // the roll starts with the dash and finishes during the slide after it
   if (p.state === 'dash' || p.anim === 'roll') {
     const frames = p.dashX < 0 ? set.rollL : set.roll
@@ -1143,13 +1581,14 @@ function playerSprite(p: Player): Sprite {
     const swingEnd = MELEE_WINDUP + MELEE_ACTIVE
     return pick(set.melee, t < MELEE_WINDUP ? 0 : t < swingEnd ? 1 : t < swingEnd + MELEE_RECOVERY / 2 ? 2 : 3)
   }
-  if (p.anim === 'throw') return pick(set.throw, Math.floor(p.animT / THROW_FRAME))
+  if (p.anim === 'throw') return pick(set.throw, art.throwTicks ? timedFrame(p.animT, art.throwTicks, false) : Math.floor(p.animT / THROW_FRAME))
   if (p.anim === 'reach') return pick(set.catch, 0)
-  if (p.anim === 'catch') return pick(set.catch, 1)
+  if (p.anim === 'catch') return pick(set.catch, set.catch.down.length > 2 && p.animT >= 6 ? 2 : 1)
   // stand/run frames are symmetric, so they ignore the aim side
   const a = p.moving ? set.run : set.stand
   const frames = p.facing === 'down' ? a.down : p.facing === 'up' ? a.up : p.flip ? a.sideL : a.sideR
-  return frames[runFrame(p) % frames.length]
+  const frame = !p.moving && art.idleTicks ? timedFrame(tick + p.id * 23, art.idleTicks) : runFrame(p)
+  return frames[frame % frames.length]
 }
 
 // ---------------------------------------------------------------- deaths
@@ -1158,14 +1597,27 @@ function credit(p: Player): number {
   return tick - p.lastShoveT < HAZARD_CREDIT_TICKS ? p.lastShover : -1
 }
 
+/**
+ * Credit for a kill to player k, if they are still in the game (a removed bot may still be owed it):
+ * a point in practice, where kills are the only score; a kill in a match, where the score counts
+ * rounds (docs/01 §10) and kills only break ties.
+ */
+function scoreTo(k: number) {
+  const q = playerById(k)
+  if (!q) return
+  if (match.on) q.kills++
+  else q.score++
+}
+
 function award(p: Player, killer: number, verb: string, cause?: string) {
-  if (killer >= 0 && killer !== p.id) players[killer].score++
+  if (killer >= 0 && killer !== p.id) scoreTo(killer)
   const who = cause ?? (killer >= 0 ? `P${killer}` : 'something')
   eventLog.push(`t${tick} ${who} ${verb} P${p.id}${cause && killer >= 0 ? ` (P${killer})` : ''}`)
 }
 
 /** Cut in two along (dx, dy): boomerangs, melee, blasts, spikes and crushers all end this way. */
 function killSlice(p: Player, dx: number, dy: number, killer: number, cause?: string) {
+  if (p.state === 'dead' || p.spawnProtect > 0 || isAlly(killer, p)) return
   const s = playerSprite(p)
   const sx = Math.round(p.x) - 7
   const sy = Math.round(p.y) - 17
@@ -1179,48 +1631,82 @@ function killSlice(p: Player, dx: number, dy: number, killer: number, cause?: st
     halves.push({ s, sx: 0, sy: 0, sw: cut, sh: s.h, x: sx, y: sy, vx: -0.22, vy: dy * 0.5, ttl: 36, max: 36 })
     halves.push({ s, sx: cut, sy: 0, sw: s.w - cut, sh: s.h, x: sx + cut, y: sy, vx: 0.22, vy: dy * 0.5, ttl: 36, max: 36 })
   }
-  spawnBurst(p.x, p.y - 8, PLAYER_COLORS[p.color], 14, 1.6)
+  // docs/01 §8 kill feedback: a ring in the victim's colour, chunks of them, sparks along the cut, a splat
+  // left on the floor, a shake and a held frame (the body flashes white: see drawHalves)
+  const col = PLAYER_COLORS[p.color]
+  vfx.ring(p.x, p.y - 6, 3, 16, col, 10, 0.7)
+  vfx.chunks(p.x, p.y - 8, [col, darken(col, 0.35), PAL.white], 7, 1.4, 6)
+  vfx.sparks(p.x, p.y - 8, PAL.white, 6, 2.2, 6, dx, dy)
+  vfx.decal('splat', p.x + dx * 4, p.y + dy * 3, darken(col, 0.45), { w: 5, h: 3, ttl: 420 })
+  shakeAt(p.x, SHAKE_KILL, 8)
+  sfx('slice', p.x)
   die(p)
   award(p, killer, 'sliced', cause)
 }
 
 function killPit(p: Player, what: string) {
+  if (p.state === 'dead' || p.spawnProtect > 0) return
   const s = playerSprite(p)
-  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 28, max: 28 })
+  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 28, max: 28, flash: false })
+  vfx.dust(p.x, p.y, 4, look.dust, 0.5)
+  sfx('fall', p.x)
   die(p)
   const k = credit(p)
-  if (k >= 0) players[k].score++
+  if (k >= 0) scoreTo(k)
   eventLog.push(`t${tick} P${p.id} ${what}${k >= 0 ? ` (shoved by P${k})` : ''}`)
 }
 
-/** Fire: the body goes up in a puff and an ash silhouette sinks into the grate. */
-function killBurn(p: Player) {
+/**
+ * Fire: the body goes up in a puff and an ash silhouette sinks into the floor. A vent is a hazard
+ * (a recent shover gets the credit); a fire boomerang's trail belongs to whoever threw it.
+ */
+function killBurn(p: Player, killer = -1) {
+  if (p.state === 'dead' || p.spawnProtect > 0 || isAlly(killer, p)) return
   const s = sil(playerSprite(p), PAL.ironLight)
-  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 20, max: 20 })
-  spawnBurst(p.x, p.y - 8, PAL.flameO, 16, 1.6)
-  spawnBurst(p.x, p.y - 10, PAL.flameY, 8, 1)
+  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 20, max: 20, flash: true })
+  vfx.embers(p.x, p.y - 8, 14, 4, 5)
+  vfx.sparks(p.x, p.y - 10, PAL.flameY, 6, 1.4, 8)
+  vfx.smoke(p.x, p.y - 12, 5, '#2a2230', 10, 3)
+  shakeAt(p.x, SHAKE_KILL, 8)
+  sfx('burn', p.x)
   die(p)
-  const k = credit(p)
-  if (k >= 0) players[k].score++
+  const k = killer >= 0 ? killer : credit(p)
+  if (k >= 0 && k !== p.id) scoreTo(k)
   eventLog.push(`t${tick} fire got P${p.id}${k >= 0 ? ` (P${k})` : ''}`)
 }
 
 /** Something heavy landed on them: flattened on the spot. */
 function killSquash(p: Player, killer: number, cause: string) {
+  if (p.state === 'dead' || p.spawnProtect > 0 || isAlly(killer, p)) return
   const s = playerSprite(p)
-  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 10, max: 10 })
-  spawnBurst(p.x, p.y - 4, PLAYER_COLORS[p.color], 12, 1.8)
+  sinks.push({ s, x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 10, max: 10, flash: true })
+  const col = PLAYER_COLORS[p.color]
+  // flattened: everything goes sideways, nothing goes up
+  vfx.chunks(p.x, p.y - 2, [col, darken(col, 0.35)], 8, 2.2, 1, 150)
+  vfx.dust(p.x, p.y, 8, look.dust, 1.2)
+  vfx.decal('splat', p.x, p.y, darken(col, 0.45), { w: 7, h: 4, ttl: 420 })
+  shakeAt(p.x, SHAKE_KILL, 8)
+  sfx('squash', p.x)
   die(p)
   award(p, killer, 'flattened', cause)
 }
 
 function die(p: Player) {
+  if (p.state === 'dead') return
+  deathSlowT = DEATH_SLOW_TICKS
+  deathX = p.x
+  deathY = p.y
+  music.deathSlow()
+  if (match.on) p.lives = Math.max(0, p.lives - 1)
+  if (net && params.has('test')) console.log(`NET death t${netTick} slot=${p.id} lives=${p.lives}`)
+
   p.state = 'dead'
   p.stateT = 0
   p.respawnT = RESPAWN_TICKS
   p.held = false
   p.vx = p.vy = p.kbx = p.kby = p.slideX = p.slideY = 0
   p.plat = -1
+  p.powers.length = 0 // docs/01 §12: power-ups go with you (Boomerang Fu keeps them; decision for Aaron)
 }
 
 function respawn(p: Player) {
@@ -1231,6 +1717,7 @@ function respawn(p: Player) {
   p.stateT = 0
   p.held = true
   p.invuln = SPAWN_PROTECT
+  p.spawnProtect = SPAWN_PROTECT
   p.dashCd = 0
   p.throwRec = 0
   p.anim = 'none'
@@ -1239,6 +1726,8 @@ function respawn(p: Player) {
   p.windup = 0
   p.lastShoveT = -9999
   p.turn = null
+  p.spawnT = SPAWN_DROP // render-only: the body drops in from above and lands (drawPlayer)
+  sfx('spawnDrop', p.x)
 }
 
 // ---------------------------------------------------------------- tiles and props
@@ -1249,7 +1738,10 @@ function cutGrass(c: number, r: number) {
   grassCut[i] = tick
   cutList.push(i)
   redrawCells(staticCtx, arena, [{ c, r }], seed, grassLook, look)
-  spawnBurst(c * TILE + 8, r * TILE + 6, PAL.grass[1], 6, 0.9)
+  // cut grass: blades fly up and fall, a couple of leaves come down after
+  vfx.chunks(c * TILE + 8, r * TILE + 8, [PAL.grass[1], PAL.grass[2], PAL.grass[0]], 6, 0.9, 5, 90)
+  for (let i = 0; i < 2; i++) vfx.ambient('leaf', c * TILE + 4 + vfx.rng() * 8, r * TILE + 8, PAL.grass[2])
+  sfx('grass', c * TILE + 8)
 }
 
 /** Every tile whose centre is within `radius` of (x, y). */
@@ -1271,10 +1763,18 @@ function breakCrate(ci: number, by: number) {
   solid[idx(cr.c, cr.r)] = 0
   const x = cr.c * TILE + 8
   const y = cr.r * TILE + 8
-  spawnBurst(x, y - 6, PAL.wood, 10, 1.6)
-  spawnBurst(x, y - 6, PAL.woodDark, 6, 1)
+  // splinters that bounce and lie where they fall, plus a puff of the room's dust
+  vfx.chunks(x, y - 2, [PAL.wood, PAL.woodDark, PAL.woodLight], 10, 1.6, 6, 150)
+  vfx.dust(x, y, 5, look.dust, 0.7)
   eventLog.push(`t${tick} ${by >= 0 ? `P${by}` : 'something'} broke a crate`)
-  if (near(x)) sfxCrunch()
+  sfx('crate', x)
+  // docs/02 §4.3: a crate may hold a power-up. It lands ready, right where the crate stood.
+  if (powerupsOn && rng() < CRATE_DROP_CHANCE) {
+    const kind = pickKind()
+    pickups.push({ kind, x, y, t: 0, ready: true })
+    spawnBurst(x, y - 6, POWERS[kind].color, 8, 1.2)
+    eventLog.push(`t${tick} the crate held ${POWERS[kind].name}`)
+  }
 }
 
 function lightBarrel(bi: number, by: number) {
@@ -1283,8 +1783,9 @@ function lightBarrel(bi: number, by: number) {
   bl.lit = true
   bl.fuse = BARREL_FUSE
   bl.lighter = by
-  spawnBurst(bl.c * TILE + 8, bl.r * TILE - 2, PAL.flameY, 4, 0.8)
+  vfx.sparks(bl.c * TILE + 8, bl.r * TILE + 8, PAL.flameY, 5, 1.2, 12)
   eventLog.push(`t${tick} ${by >= 0 ? `P${by}` : 'something'} lit a barrel`)
+  sfx('barrelLit', bl.c * TILE + 8)
 }
 
 /** Crates go, barrels light, grass falls, in a circle: a swing, a blast, a passing boomerang. */
@@ -1304,20 +1805,26 @@ function wreckNear(x: number, y: number, radius: number, by: number, opts: { cra
  */
 function blast(x: number, y: number, hitR: number, ringR: number, killer: number, cause?: string) {
   for (const q of players) {
-    if (q.state === 'dead' || q.invuln > 0) continue
+    if (q.state === 'dead' || q.invuln > 0 || isAlly(killer, q)) continue
     const dx = q.x - x
     const dy = q.y - y
     const d = len(dx, dy)
     if (d < hitR + HURT_RADIUS) {
       const [nx, ny] = d > 1e-6 ? norm(dx, dy) : [0, -1]
+      if (tryShield(q, nx, ny)) continue
       killSlice(q, nx, ny, killer >= 0 ? killer : credit(q), cause ?? 'the blast')
     }
   }
   wreckNear(x, y, hitR + 4, killer, { crates: true, barrels: true, grass: true })
   blasts.push({ x, y: y - 4, r: ringR, ttl: BLAST_TTL, max: BLAST_TTL })
-  spawnBurst(x, y - 4, PAL.flameO, 22, 3)
-  spawnBurst(x, y - 4, PAL.flameY, 10, 1.8)
-  if (near(x)) sfxBlast()
+  // the bang: a white flash, the biggest shake there is, embers and sparks out, smoke up, a scorch left behind
+  vfx.sparks(x, y - 4, PAL.flameY, 14, 3, 6)
+  vfx.embers(x, y - 4, 18, 4, ringR * 0.5)
+  vfx.smoke(x, y - 6, 8, '#2a2230', 6, ringR * 0.4)
+  vfx.decal('scorch', x, y, '#1a1416', { w: Math.round(ringR * 0.55), h: Math.round(ringR * 0.35), ttl: SCORCH_TTL })
+  shakeAt(x, SHAKE_BLAST, 12)
+  flashAt(x, 0.35, 3)
+  sfx('blast', x)
 }
 
 /** The nearest plain floor tile centre to (x, y): where a boomerang lost to a pit turns up. */
@@ -1362,7 +1869,7 @@ function bounceOffBumpers(o: { x: number; y: number; vx: number; vy: number }, r
     o.y = bu.y + ny * minD
     if (fx) {
       bu.hitT = tick
-      if (near(bu.x)) sfxBump()
+      sfx('bumper', bu.x)
     }
     hit = true
   }
@@ -1411,7 +1918,11 @@ function newBoomerang(owner: number, x: number, y: number, ax: number, ay: numbe
     range: THROW_RANGE,
     traveled: 0,
     decel: flightDecel(BOOM_SPEED, THROW_RANGE),
-    recall: false,
+    hovering: false,
+    hoverReady: false,
+    hoverUsed: false,
+    hoverReleased: false,
+    brakeT: 0,
     hangT: 0,
     armed: false,
     fire: 0,
@@ -1420,20 +1931,67 @@ function newBoomerang(owner: number, x: number, y: number, ax: number, ay: numbe
     spin: 0,
     trail: [],
     hit: new Set(),
+    powers: new Set(),
+    phantom: false,
+    lastTile: -1,
   }
 }
 
+/**
+ * The throw copies the thrower's boomerang flags onto the boomerang (docs/01 §12: they ride with it
+ * from here, through steals). Triple adds two phantoms TRIPLE_SPREAD either side with the same flags.
+ */
 function throwBoomerang(p: Player) {
   const o = throwOrigin(p)
-  booms.push(newBoomerang(p.id, o.x, o.y, p.aimX, p.aimY))
+  const flags = p.powers.filter((k) => POWERS[k].boomerang)
+  const b = newBoomerang(p.id, o.x, o.y, p.aimX, p.aimY)
+  for (const k of flags) b.powers.add(k)
+  booms.push(b)
+  if (b.powers.has('triple')) {
+    for (const s of [-1, 1]) {
+      const [ax, ay] = rotate(p.aimX, p.aimY, s * TRIPLE_SPREAD)
+      const ph = newBoomerang(p.id, o.x, o.y, ax, ay)
+      for (const k of flags) ph.powers.add(k)
+      ph.phantom = true
+      booms.push(ph)
+    }
+  }
   p.held = false
   p.throwRec = THROW_RECOVERY
   p.anim = 'throw'
   p.animT = 0
+  // the release: a few sparks off the hand along the throw
+  vfx.sparks(o.x, o.y - 4, PAL.white, 4, 1.6, 4, p.aimX, p.aimY)
+  sfx('throw', o.x, { pitch: b.powers.has('big') ? 0.8 : 1 })
+
+}
+
+/** Sim-side rotation. Math.sin/cos may differ in the last bit between browsers, which lockstep cannot have; util/trig.ts is bit-exact everywhere. */
+function rotate(x: number, y: number, a: number): [number, number] {
+  const c = dcos(a)
+  const s = dsin(a)
+  return [x * c - y * s, x * s + y * c]
+}
+
+/** Hit radius against players and swings: a big boomerang reaches twice as far. */
+function boomHitR(b: Boomerang): number {
+  return b.powers.has('big') ? BOOM_RADIUS * BIG_SCALE : BOOM_RADIUS
+}
+
+/** A phantom hit by a swing or at the end of its flight: gone in a puff, nothing to steal. */
+function popPhantom(b: Boomerang) {
+  vfx.ring(b.x, b.y - 6, 2, 9, PAL.white, 8, 0.8)
+  spawnBurst(b.x, b.y - 6, PAL.white, 6, 1.2)
+  sfx('phantomPop', b.x)
+  b.flight = -1
 }
 
 /** Start the catch pose, if the body is free to show it (a dash or melee keeps its own frames). */
 function startCatchAnim(p: Player) {
+  // the catch itself: a small ring and sparks at the hand (even when the body is busy and keeps its frames)
+  vfx.ring(p.x, p.y - 10, 2, 8, PAL.white, 7, 0.8)
+  vfx.sparks(p.x, p.y - 10, PAL.white, 4, 1.2, 8)
+  sfx('catch', p.x)
   if (p.state !== 'idle') return
   p.anim = 'catch'
   p.animT = 0
@@ -1457,14 +2015,31 @@ function passTile(b: Boomerang) {
   if (crateAt[i] >= 0) breakCrate(crateAt[i], b.owner)
   const k = arena.tiles[i]
   if (k === TileKind.Grass) cutGrass(c, r)
-  else if (k === TileKind.Vent && phaseOf(k, c, r).phase === 'on') b.fire = BOOM_FIRE_TICKS
+  else if (k === TileKind.Vent && phaseOf(k, c, r).phase === 'on') {
+    // the 02 §4.7 hook: a lit vent gives the boomerang the Fire flag for the rest of this flight
+    b.fire = BOOM_FIRE_TICKS
+    if (!b.powers.has('fire')) {
+      b.powers.add('fire')
+      // fire and ice never ride together (docs/03 §6): the vent's flame burns the frost off an ice boomerang
+      const thawed = b.powers.delete('ice')
+      eventLog.push(`t${tick} P${b.owner}'s boomerang caught fire from a vent${thawed ? ' and lost its ice' : ''}`)
+    }
+  }
+  // a fire boomerang lays a tile of fire, an ice boomerang a tile of ice, on each tile it crosses
+  // on the way out, once clear of the hand (they never ride together: see the vent above and givePower)
+  if (b.state === 'out' && b.traveled > FIRE_START && i !== b.lastTile && (b.powers.has('fire') || b.powers.has('ice'))) {
+    const first = b.lastTile === -1 && !b.phantom
+    b.lastTile = i
+    if (b.powers.has('ice')) layIce(c, r, b.owner, first)
+    else lightFloor(c, r, b.owner)
+  }
   for (const ch of chandeliers) {
     if (ch.state === 'hang' && len(b.x - ch.x, b.y - ch.y) < CHANDELIER_TRIGGER_RADIUS) {
       ch.state = 'creak'
       ch.t = 0
       ch.by = b.owner
       eventLog.push(`t${tick} P${b.owner} hit a chandelier`)
-      if (near(ch.x)) sfxCreak()
+      sfx('creak', ch.x)
     }
   }
 }
@@ -1474,10 +2049,10 @@ function passTile(b: Boomerang) {
 // overshoots). Wall hits reflect the velocity and keep counting distance. Returns true on the tick
 // it comes to rest. Shared by the sim and the aim-indicator preview (fx=false: no sparks and no
 // side effects on the world, so the render side never touches the sim rng).
-function flyOutbound(b: Boomerang, fx: boolean): boolean {
+function flyOutbound(b: Boomerang, fx: boolean, brake = 0): boolean {
   if (b.bounces >= BOOM_MAX_BOUNCES || b.flight >= BOOM_MAX_FLIGHT) b.decel = Math.max(b.decel, BOOM_BRAKE)
   const was = len(b.vx, b.vy)
-  const sp = Math.max(0, Math.min(was - b.decel, b.range - b.traveled))
+  const sp = Math.max(0, Math.min(was - Math.max(b.decel, brake), b.range - b.traveled))
   if (was > 1e-6) {
     b.vx *= sp / was
     b.vy *= sp / was
@@ -1494,7 +2069,7 @@ function flyOutbound(b: Boomerang, fx: boolean): boolean {
       const { from, to } = ahead
       if (fx) {
         spawnBurst(from.gx, from.gy, from.lit, 6, 1.2)
-        if (near(from.x) || near(to.x)) sfxWarp()
+        sfx('warp', closerX(from.x, to.x))
         ahead.portal.usedT = tick
         eventLog.push(`t${tick} P${b.owner}'s boomerang went through the ${from.hue} portal`)
         b.trail.length = 0
@@ -1508,7 +2083,8 @@ function flyOutbound(b: Boomerang, fx: boolean): boolean {
       b.vx = -b.vx
       b.bounces++
       if (fx) {
-        spawnBurst(b.x, b.y - 4, PAL.boneDark, 3, 0.9)
+        wallHitFx(b, Math.sign(b.vx), 0)
+        bounceSfx(b)
         wreckNear(b.x, b.y, 14, b.owner, { crates: false, barrels: true, grass: false })
       }
     }
@@ -1516,7 +2092,8 @@ function flyOutbound(b: Boomerang, fx: boolean): boolean {
       b.vy = -b.vy
       b.bounces++
       if (fx) {
-        spawnBurst(b.x, b.y - 4, PAL.boneDark, 3, 0.9)
+        wallHitFx(b, 0, Math.sign(b.vy))
+        bounceSfx(b)
         wreckNear(b.x, b.y, 14, b.owner, { crates: false, barrels: true, grass: false })
       }
     }
@@ -1531,10 +2108,28 @@ function flyOutbound(b: Boomerang, fx: boolean): boolean {
   return false
 }
 
+/** A boomerang off a wall: sparks in its colour away from the wall (nx, ny points back into the room) and grit off the wall. */
+function wallHitFx(b: Boomerang, nx: number, ny: number) {
+  vfx.sparks(b.x, b.y - 4, boomHue(b), 4, 1.6, 4, nx, ny)
+  vfx.dust(b.x + nx * 2, b.y + ny * 2, 2, look.dust, 0.5, nx, ny)
+}
+
+/** The ricochet: a semitone higher per bounce of this flight (docs/07 §4: pitch is the cartoon's counter), phantoms quieter. */
+function bounceSfx(b: Boomerang) {
+  // a semitone higher per bounce so the ear counts them, capped at four so a long rally stays wood
+  sfx('bounce', b.x, { pitch: Math.pow(2, Math.min(4, b.bounces - 1) / 12), gain: b.phantom ? 0.4 : 1 })
+
+}
+
 // A melee swing connecting with an airborne boomerang. A steal keeps an armed boomerang armed;
 // smacking a boomerang you already own arms it: it relaunches over BOMB_RANGE, sits, beeps twice,
 // shrinks and blows up.
 function deflect(b: Boomerang, p: Player) {
+  if (b.phantom) {
+    popPhantom(b)
+    eventLog.push(`t${tick} P${p.id} popped a phantom`)
+    return
+  }
   if (b.owner === p.id) b.armed = true
   const speed = b.armed ? BOOM_SPEED * BOMB_SPEED_MULT : DEFLECT_SPEED
   const range = b.armed ? BOMB_RANGE : DEFLECT_RANGE
@@ -1545,13 +2140,22 @@ function deflect(b: Boomerang, p: Player) {
   b.range = range
   b.traveled = 0
   b.decel = flightDecel(speed, range)
-  b.recall = false
+  b.hovering = false
+  b.hoverReady = false
+  b.brakeT = 0
   b.hangT = 0
   b.bounces = 0
   b.flight = 0
   b.hit.clear()
-  spawnBurst(b.x, b.y - 6, b.armed ? BOMB_COLOR : PAL.white, b.armed ? 14 : 8, 1.4)
+  // the clang: a ring and sparks along the new direction; arming it adds the bomb's orange
+  vfx.ring(b.x, b.y - 6, 2, b.armed ? 14 : 10, b.armed ? BOMB_COLOR : PAL.white, 8, 0.8)
+  vfx.sparks(b.x, b.y - 6, PAL.white, b.armed ? 10 : 7, 2.4, 6, p.aimX, p.aimY)
+  if (b.armed) vfx.embers(b.x, b.y - 6, 8, 6, 3)
+  shakeAt(b.x, 1, 4)
   eventLog.push(`t${tick} P${p.id} deflected${b.armed ? ' (armed)' : ''}`)
+  // the clang is the deflect; arming your own boomerang gets the cuckoo instead (docs/07 §4.2)
+  sfx(b.armed ? 'arm' : 'deflect', b.x)
+
 }
 
 /** Where an armed boomerang is in its fuse: flashing white on a beep, and how far it has shrunk. */
@@ -1567,7 +2171,8 @@ function fusePhase(b: Boomerang): { flash: boolean; scale: number } {
 // One beep of the fuse: a white flash (fusePhase), a small ring pulse and a blip.
 function beep(b: Boomerang) {
   blasts.push({ x: b.x, y: b.y - BOOM_HEIGHT, r: BEEP_RING, ttl: BEEP_RING_TTL, max: BEEP_RING_TTL })
-  if (near(b.x)) sfxBeep()
+  // the second beep a major third up: the question, then the answer
+  sfx('beep', b.x, { pitch: b.hangT >= BOMB_PAUSE + BOMB_BEEP_GAP ? 1.26 : 1 })
 }
 
 // An armed boomerang at the end of its fuse: everyone in the blast radius dies, the owner included,
@@ -1582,9 +2187,10 @@ function explode(b: Boomerang) {
 
 // Dry run of a throw from where the player stands: the per-tick ground positions of the outbound
 // flight, bounces included, ending where it will stop and hang. Drives the aim indicator.
-function previewThrow(p: Player): { x: number; y: number }[] {
+function previewThrow(p: Player, rot = 0): { x: number; y: number }[] {
   const o = throwOrigin(p)
-  const d = newBoomerang(p.id, o.x, o.y, p.aimX, p.aimY)
+  const [ax, ay] = rot ? rotate(p.aimX, p.aimY, rot) : [p.aimX, p.aimY]
+  const d = newBoomerang(p.id, o.x, o.y, ax, ay)
   const pts = [{ x: d.x, y: d.y }]
   for (let i = 0; i < BOOM_MAX_FLIGHT; i++) {
     d.flight++
@@ -1599,7 +2205,7 @@ function nearestEnemy(p: Player): Player | null {
   let best: Player | null = null
   let bd = Infinity
   for (const q of players) {
-    if (q.id === p.id || q.state === 'dead') continue
+    if (q.id === p.id || isAlly(p.id, q) || q.state === 'dead') continue
     const d = len(q.x - p.x, q.y - p.y)
     if (d < bd) {
       bd = d
@@ -1609,7 +2215,11 @@ function nearestEnemy(p: Player): Player | null {
   return best
 }
 
-/** Somewhere on plain floor within a screen of the local player, so the bots stay in the room with you. */
+/**
+ * Somewhere on plain floor within a screen of the first player, so the bots stay in the room with
+ * you on the strip. Sim side: it is the first player on every client, not the local one, so the
+ * bots walk the same way everywhere (roster rooms are one screen wide anyway).
+ */
 function randomWalkTarget(): [number, number] {
   const pc = Math.floor(players[0].x / TILE)
   const cMin = Math.max(1, pc - 18)
@@ -1628,9 +2238,24 @@ function aiInput(p: Player): Input {
   const inp: Input = { mx: 0, my: 0, throw: false, melee: false, dash: false, hold: false, cursorX: p.cursorX, cursorY: p.cursorY }
   ai.retarget--
   const own = booms.find((b) => b.owner === p.id && b.state === 'dropped')
+  // a power-up waiting nearby is worth a detour while there is room for it
+  let want: Pickup | null = null
+  if (p.powers.length < POWERUP_CAP) {
+    let bd = 160
+    for (const pk of pickups) {
+      const d = len(pk.x - p.x, pk.y - p.y)
+      if (pk.ready && d < bd) {
+        bd = d
+        want = pk
+      }
+    }
+  }
   if (!p.held && own) {
     ai.tx = own.x
     ai.ty = own.y
+  } else if (want) {
+    ai.tx = want.x
+    ai.ty = want.y
   } else if (ai.retarget <= 0 || len(ai.tx - p.x, ai.ty - p.y) < 6) {
     ;[ai.tx, ai.ty] = randomWalkTarget()
     ai.retarget = 90 + Math.floor(rng() * 150)
@@ -1658,7 +2283,7 @@ function aiInput(p: Player): Input {
   }
   // deflect anything coming at us
   for (const b of booms) {
-    if (b.owner === p.id || b.state === 'dropped') continue
+    if (b.owner === p.id || isAlly(b.owner, p) || b.state === 'dropped') continue
     const d = len(b.x - p.x, b.y - p.y)
     const closing = (b.x - p.x) * b.vx + (b.y - p.y) * b.vy < 0
     if (d < 26 && closing && rng() < 0.35) {
@@ -1669,6 +2294,306 @@ function aiInput(p: Player): Input {
   }
   if (rng() < 0.003) inp.dash = true
   return inp
+}
+
+// ---------------------------------------------------------------- power-ups
+function hasPower(p: Player, k: PowerKind): boolean {
+  return p.powers.includes(k)
+}
+
+/**
+ * Take a power-up: a repeat moves it to newest, a fourth pushes the oldest out (docs/03 §4). Fire and
+ * Ice never share a stack (Boomerang Fu's rule, 03 §2): taking one lets go of the other.
+ */
+function givePower(p: Player, k: PowerKind) {
+  const i = p.powers.indexOf(k)
+  const rival: PowerKind | null = k === 'fire' ? 'ice' : k === 'ice' ? 'fire' : null
+  const j = rival ? p.powers.indexOf(rival) : -1
+  if (i >= 0) p.powers.splice(i, 1)
+  else if (rival && j >= 0) {
+    p.powers.splice(j, 1)
+    eventLog.push(`t${tick} P${p.id} let go of ${POWERS[rival].name} for ${POWERS[k].name}`)
+    sfx('pickupLost', p.x, { delay: 0.3 }) // the gliss down, after the take's gliss up
+  } else if (p.powers.length >= POWERUP_CAP) {
+    const old = p.powers.shift()!
+    eventLog.push(`t${tick} P${p.id} let go of ${POWERS[old].name} for ${POWERS[k].name}`)
+    sfx('pickupLost', p.x, { delay: 0.3 })
+  }
+  p.powers.push(k)
+}
+
+/** The next kind to put on the floor: seeded, never the same one twice running. */
+function pickKind(): PowerKind {
+  const pool = POWER_KINDS.filter((k) => k !== lastPickupKind)
+  const k = pool[Math.floor(rng() * pool.length)]
+  lastPickupKind = k
+  return k
+}
+
+/**
+ * Announce a pickup on a free `p` point. With someone already stacked up it lands on the free point
+ * farthest from them: Boomerang Fu's "finger very gently on the scales", placement not odds.
+ */
+function spawnPickup() {
+  const free = arena.powerups.filter((pt) => !pickups.some((pk) => pk.x === pt.c * TILE + 8 && pk.y === pt.r * TILE + 8))
+  if (free.length === 0) return
+  let pt = free[Math.floor(rng() * free.length)]
+  let rich: Player | null = null
+  for (const p of players) if (p.state !== 'dead' && p.powers.length >= 2 && (!rich || p.powers.length > rich.powers.length)) rich = p
+  if (rich) {
+    const r = rich
+    const far = (q: { c: number; r: number }) => len(q.c * TILE + 8 - r.x, q.r * TILE + 8 - r.y)
+    pt = free.reduce((a, b) => (far(b) > far(a) ? b : a))
+  }
+  pickups.push({ kind: pickKind(), x: pt.c * TILE + 8, y: pt.r * TILE + 8, t: 0, ready: false })
+  sfx('pickupGlow', pt.c * TILE + 8)
+}
+
+/** Tick step 10 (docs/01 §9): announce, land, fizzle and take pickups. */
+function stepPickups() {
+  // the clock only runs while there is room on the floor, so taking one never spawns the next at once
+  if (powerupsOn && arena.powerups.length > 0 && pickups.length < POWERUP_MAX_ON_FIELD && --nextPickupT <= 0) {
+    spawnPickup()
+    nextPickupT = POWERUP_INTERVAL
+  }
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const pk = pickups[i]
+    const info = POWERS[pk.kind]
+    pk.t++
+    if (!pk.ready) {
+      if (pk.t >= POWERUP_WARN) {
+        pk.ready = true
+        pk.t = 0
+        vfx.ring(pk.x, pk.y, 2, 12, info.color, 10, 0.5)
+        vfx.sparks(pk.x, pk.y, info.color, 8, 1.2, 2)
+        eventLog.push(`t${tick} ${info.name} landed`)
+        sfx('pickupLand', pk.x)
+      }
+      continue
+    }
+    if (pk.t >= POWERUP_TTL) {
+      vfx.smoke(pk.x, pk.y - 4, 3, '#2a2230', 4, 2) // fizzles out
+      sfx('pickupFizzle', pk.x)
+      pickups.splice(i, 1)
+      continue
+    }
+    // the nearest player inside the radius takes it; at a dead heat the lower id (deterministic, docs/03 §10)
+    let taker: Player | null = null
+    let bd = POWERUP_PICK_RADIUS
+    for (const p of players) {
+      if (p.state === 'dead') continue
+      const d = len(p.x - pk.x, p.y - pk.y)
+      if (d < bd) {
+        bd = d
+        taker = p
+      }
+    }
+    if (taker) {
+      givePower(taker, pk.kind)
+      vfx.ring(pk.x, pk.y - 6, 2, 10, info.color, 8, 0.8)
+      vfx.sparks(pk.x, pk.y - 6, info.color, 10, 1.6, 6)
+      eventLog.push(`t${tick} P${taker.id} took ${info.name}`)
+      sfx('pickupTake', pk.x)
+      pickups.splice(i, 1)
+    }
+  }
+}
+
+/**
+ * A shielded player takes a hit on the shield instead: it pops, they are knocked back along the hit
+ * and get a moment's grace. Called where a hit would kill; never for the floor or things falling on you.
+ */
+function tryShield(p: Player, dx: number, dy: number): boolean {
+  if (!hasPower(p, 'shield')) return false
+  p.powers.splice(p.powers.indexOf('shield'), 1)
+  const [nx, ny] = len(dx, dy) > 1e-6 ? norm(dx, dy) : [0, 0]
+  p.kbx += nx * SHIELD_KB
+  p.kby += ny * SHIELD_KB
+  p.invuln = Math.max(p.invuln, SHIELD_GRACE)
+  // the pop: the ring bursts outward, teal sparks, a little shake
+  vfx.ring(p.x, p.y - 8, 8, 18, PAL.teal, 10, 0.9, PAL.white)
+  vfx.sparks(p.x, p.y - 8, PAL.teal, 12, 2, 8)
+  shakeAt(p.x, 1, 5)
+  eventLog.push(`t${tick} P${p.id}'s shield popped`)
+  sfx('shieldPop', p.x)
+  return true
+}
+
+/** Fire and ice take to anything you can stand on except the room's own ice and the vents' grates; never a wall, a pit or a prop. */
+function canCoat(c: number, r: number): boolean {
+  if (c < 0 || r < 0 || c >= arena.cols || r >= arena.rows) return false
+  const i = idx(c, r)
+  const k = arena.tiles[i]
+  if (k === TileKind.Wall || k === TileKind.Pit || k === TileKind.Ice || k === TileKind.Vent) return false
+  return solid[i] === 0
+}
+
+function putOutFire(i: number) {
+  fireAt[i] = -1
+  fireBy[i] = -1
+  const k = fireList.indexOf(i)
+  if (k >= 0) fireList.splice(k, 1)
+}
+
+function meltIce(i: number) {
+  iceAt[i] = -1
+  iceBy[i] = -1
+  const k = iceList.indexOf(i)
+  if (k >= 0) iceList.splice(k, 1)
+}
+
+/** Fire meeting ice, either way round: both go and a puff of steam is left (docs/03 §6). */
+function steam(c: number, r: number) {
+  const x = c * TILE + 8
+  const y = r * TILE + 8
+  vfx.smoke(x, y - 2, 3, '#c8d8e0', 5, 3)
+  vfx.dust(x, y, 2, PAL.iceLight, 0.5)
+  sfx('steam', x)
+}
+
+/**
+ * Set a tile alight: a fire boomerang passing over it, or the grass next to a burning tile. Fire
+ * over laid ice melts it instead and lights nothing.
+ */
+function lightFloor(c: number, r: number, by: number) {
+  if (!canCoat(c, r)) return
+  const i = idx(c, r)
+  if (fireAt[i] >= 0) return
+  if (iceAt[i] >= 0) {
+    meltIce(i)
+    steam(c, r)
+    return
+  }
+  fireAt[i] = tick
+  fireBy[i] = by
+  fireList.push(i)
+  cutGrass(c, r)
+}
+
+/**
+ * Coat a tile in ice: an ice boomerang passing over it. Ice over a burning tile puts the fire out
+ * instead and lays nothing. Crossing a tile already iced refreshes its clock. The grass under it is
+ * flattened so the ice reads. `first` is the throw's first tile, which carries the sound.
+ */
+function layIce(c: number, r: number, by: number, first: boolean) {
+  if (!canCoat(c, r)) return
+  const i = idx(c, r)
+  if (fireAt[i] >= 0) {
+    putOutFire(i)
+    steam(c, r)
+    return
+  }
+  const fresh = iceAt[i] < 0
+  if (fresh) iceList.push(i)
+  iceAt[i] = tick
+  iceBy[i] = by
+  cutGrass(c, r)
+  const x = c * TILE + 8
+  const y = r * TILE + 8
+  if (fresh) {
+    vfx.shards(x, y, 2, 0.8, 2)
+    vfx.dust(x, y, 1, PAL.iceLight, 0.4)
+  }
+  if (first) sfx('ice', x)
+}
+
+/**
+ * Laid ice thins away; while it lasts, whoever laid it holds the hazard credit for anyone else standing
+ * on it, unless a fresher shove has a live claim (02 §3 kill credit), so a slide off the ice into a pit
+ * or spikes is the ice-layer's kill.
+ */
+function stepIce() {
+  for (let k = iceList.length - 1; k >= 0; k--) {
+    const i = iceList[k]
+    if (tick - iceAt[i] < ICE_TTL) continue
+    const c = i % arena.cols
+    const r = Math.floor(i / arena.cols)
+    meltIce(i)
+    if (inView(c * TILE)) vfx.dust(c * TILE + 8, r * TILE + 8, 2, PAL.iceLight, 0.4)
+  }
+  if (iceList.length === 0) return
+  for (const p of players) {
+    if (p.state === 'dead') continue
+    const c = Math.floor(p.x / TILE)
+    const r = Math.floor(p.y / TILE)
+    if (c < 0 || r < 0 || c >= arena.cols || r >= arena.rows) continue
+    const i = idx(c, r)
+    const by = iceAt[i] >= 0 ? iceBy[i] : -1
+    if (by < 0 || by === p.id || isAlly(by, p)) continue
+    if (tick - p.lastShoveT >= HAZARD_CREDIT_TICKS || p.lastShover === by) {
+      p.lastShover = by
+      p.lastShoveT = tick
+    }
+  }
+}
+
+/** Fire burns down, spreads through standing grass while young, and takes whoever stands in it. */
+function stepFire() {
+  for (let k = fireList.length - 1; k >= 0; k--) {
+    const i = fireList[k]
+    const age = tick - fireAt[i]
+    if (age >= FIRE_TTL) {
+      fireAt[i] = -1
+      fireBy[i] = -1
+      fireList.splice(k, 1)
+      continue
+    }
+    if (age % FIRE_SPREAD === FIRE_SPREAD - 1 && age < FIRE_TTL / 2) {
+      const c = i % arena.cols
+      const r = Math.floor(i / arena.cols)
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        if (tileAt(arena, c + dc, r + dr) === TileKind.Grass && grassCut[idx(c + dc, r + dr)] < 0) lightFloor(c + dc, r + dr, fireBy[i])
+      }
+    }
+  }
+  if (fireList.length === 0) return
+  // standing in it: a floor rule, so no i-frames and no shield; whoever lit it gets the kill
+  for (const p of players) {
+    if (p.state === 'dead') continue
+    const c = Math.floor(p.x / TILE)
+    const r = Math.floor(p.y / TILE)
+    if (c < 0 || r < 0 || c >= arena.cols || r >= arena.rows) continue
+    const i = idx(c, r)
+    if (fireAt[i] >= 0) killBurn(p, fireBy[i])
+  }
+}
+
+/**
+ * Blink: a dash with empty hands puts you where your boomerang is, catching it, and flattens anyone
+ * you land on. False (so the dash happens instead) when there is nothing of yours out there.
+ */
+function blink(p: Player): boolean {
+  const bi = booms.findIndex((q) => q.owner === p.id && !q.phantom)
+  if (bi < 0) return false
+  const b = booms[bi]
+  const fromX = p.x
+  let to = { x: b.x, y: b.y }
+  if (blocksWalk(Math.floor(to.x / TILE), Math.floor(to.y / TILE)) && platformAt(to.x, to.y) < 0) to = nearestFloor(to.x, to.y)
+  afterimages.push({ s: playerSprite(p), x: Math.round(p.x) - 7, y: Math.round(p.y) - 17, ttl: 14, max: 14 })
+  // leaving: a ring opens where you were; arriving: one closes on where you are
+  vfx.ring(p.x, p.y - 8, 2, 12, PAL.violet, 8, 0.8)
+  vfx.sparks(p.x, p.y - 8, PAL.violet, 8, 1.6, 8)
+  p.x = to.x
+  p.y = to.y
+  p.vx = p.vy = p.kbx = p.kby = p.slideX = p.slideY = 0
+  p.turn = null
+  p.windup = 0
+  p.held = true
+  p.anim = 'none'
+  startCatchAnim(p)
+  booms.splice(bi, 1)
+  p.dashCd = DASH_COOLDOWN
+  p.invuln = Math.max(p.invuln, DASH_INVULN)
+  vfx.ring(p.x, p.y - 8, 12, 2, PAL.violet, 8, 0.8)
+  vfx.sparks(p.x, p.y - 8, PAL.white, 4, 1, 8)
+  vfx.dust(p.x, p.y, 4, look.dust, 0.8)
+  for (const q of players) {
+    if (q.id === p.id || isAlly(p.id, q) || q.state === 'dead' || q.invuln > 0) continue
+    if (len(q.x - p.x, q.y - p.y) < BLINK_SQUASH_RADIUS + HURT_RADIUS) killSquash(q, p.id, 'a blink')
+  }
+  eventLog.push(`t${tick} P${p.id} blinked${b.armed ? ' (disarmed)' : ''}`)
+  sfx('blink', closerX(fromX, p.x))
+  return true
 }
 
 // ---------------------------------------------------------------- simulation
@@ -1700,7 +2625,7 @@ function ejectFromGate(g: Gate) {
       else o.y = o.y < ty ? ty - 8 - r - 0.5 : ty + 8 + r + 0.5
       return true
     }
-    for (const p of players) if (p.state !== 'dead' && clear(p, PLAYER_RADIUS)) spawnBurst(p.x, p.y, PAL.boneDark, 3, 0.6)
+    for (const p of players) if (p.state !== 'dead' && clear(p, PLAYER_RADIUS)) vfx.dust(p.x, p.y, 3, look.dust, 0.6)
     for (const b of booms) if (b.state === 'dropped') clear(b, 3)
   }
 }
@@ -1715,7 +2640,7 @@ function stepHazards() {
     for (const t of g.tiles) solid[idx(t.c, t.r)] = closed ? 4 : 0
     if (closed) {
       ejectFromGate(g)
-      if (near(g.tiles[0].c * TILE)) sfxClank()
+      sfx('gate', g.tiles[0].c * TILE + 8)
     }
   }
 
@@ -1724,6 +2649,7 @@ function stepHazards() {
       if (p.state === 'dead' || p.invuln > 0) continue
       if (len(p.x - cr.pos.x, p.y - cr.pos.y) < CRUSHER_KILL_RADIUS + HURT_RADIUS) {
         const dx = cr.pos.dx || Math.sign(p.x - cr.pos.x) || 1
+        if (tryShield(p, dx, cr.pos.dy)) continue
         killSlice(p, dx, cr.pos.dy, credit(p), `the ${cr.look}`)
       }
     }
@@ -1745,6 +2671,7 @@ function stepHazards() {
         if (++ch.t >= CHANDELIER_CREAK) {
           ch.state = 'fall'
           ch.t = 0
+          sfx('chandelierFall', ch.x)
         }
         break
       case 'fall':
@@ -1753,10 +2680,14 @@ function stepHazards() {
             if (p.state === 'dead' || p.invuln > 0) continue
             if (len(p.x - ch.x, p.y - ch.y) < CHANDELIER_KILL_RADIUS + HURT_RADIUS) killSquash(p, ch.by, 'the chandelier')
           }
-          blasts.push({ x: ch.x, y: ch.y, r: 18, ttl: 10, max: 10 })
-          spawnBurst(ch.x, ch.y - 2, PAL.bone, 10, 1.6)
-          spawnBurst(ch.x, ch.y - 2, PAL.flameY, 6, 1.2)
-          if (near(ch.x)) sfxThud()
+          // the thud: a dust ring, bone and candle-wax chunks that lie in the rubble, the candles' last sparks, a heavy shake
+          vfx.ring(ch.x, ch.y, 4, 22, look.dust, 12, 0.5)
+          vfx.chunks(ch.x, ch.y, [PAL.bone, PAL.boneDark, PAL.flameY], 10, 1.8, 6, 180)
+          vfx.dust(ch.x, ch.y, 10, look.dust, 1.4)
+          vfx.sparks(ch.x, ch.y - 2, PAL.flameY, 5, 1.2, 6)
+          vfx.smoke(ch.x, ch.y - 4, 3, '#2a2230', 6, 6)
+          shakeAt(ch.x, SHAKE_LAND, 10)
+          sfx('chandelierLand', ch.x)
           ch.state = 'rubble'
           ch.t = 0
         }
@@ -1775,7 +2706,9 @@ function stepHazards() {
     if (!bl.alive || !bl.lit) continue
     const x = bl.c * TILE + 8
     const y = bl.r * TILE + 8
-    if (bl.fuse % 3 === 0) spawnBurst(x, y - 12, PAL.flameY, 1, 0.6)
+    // the fuse spits sparks off the top of the barrel and a thread of smoke
+    if (bl.fuse % 3 === 0) vfx.sparks(x, y, PAL.flameY, 1, 0.5, 13)
+    if (bl.fuse % 9 === 0) vfx.smoke(x, y, 1, '#3a3038', 14, 1)
     if (--bl.fuse > 0) continue
     bl.alive = false
     bl.lit = false
@@ -1792,8 +2725,11 @@ function stepHazards() {
       crumbleGone[i] = tick
       arena.tiles[i] = TileKind.Pit
       redrawCells(staticCtx, arena, [{ c, r }], seed, grassLook, look)
-      spawnBurst(c * TILE + 8, r * TILE + 8, PAL.stoneDark, 8, 1.2)
-      if (near(c * TILE)) sfxThud()
+      // the floor goes: a puff of its own colours, short-lived so nothing lies over the new hole
+      vfx.chunks(c * TILE + 8, r * TILE + 8, [look.floors[0], look.floorMortar, look.floorLight], 6, 1, 2, 40)
+      vfx.dust(c * TILE + 8, r * TILE + 8, 6, look.dust, 0.9)
+      shakeAt(c * TILE, 1, 5)
+      sfx('crumble', c * TILE + 8)
     } else if (tick - crumbleGone[i] >= CRUMBLE_RESET) {
       crumbleGone[i] = -1
       crumbleStart[i] = -1
@@ -1816,23 +2752,30 @@ function stepHazards() {
     }
   }
 
-  // tile sounds: one clank when a bank of spikes goes off near the local player
-  const p0 = players[0]
+  // tile sounds: one clank when a bank of spikes goes off, one whoomph when a bank of vents lights,
+  // placed on the nearest tile of the bank to the local player (the cycle tiles share a clock, so
+  // the whole bank fires on the same tick)
+  const p0 = local()
   const p0c = Math.floor(p0.x / TILE)
   const p0r = Math.floor(p0.y / TILE)
-  let clank = false
-  for (let r = Math.max(0, p0r - 10); r <= Math.min(arena.rows - 1, p0r + 10) && !clank; r++) {
+  let spikeX = NaN
+  let ventX = NaN
+  for (let r = Math.max(0, p0r - 10); r <= Math.min(arena.rows - 1, p0r + 10); r++) {
     for (let c = Math.max(0, p0c - 20); c <= Math.min(arena.cols - 1, p0c + 20); c++) {
       const k = tileAt(arena, c, r)
-      if (k !== TileKind.Spikes) continue
+      if (k !== TileKind.Spikes && k !== TileKind.Vent) continue
       const ph = phaseOf(k, c, r)
-      if (ph.phase === 'on' && ph.t === 0) {
-        clank = true
-        break
-      }
+      if (ph.phase !== 'on' || ph.t !== 0) continue
+      const x = c * TILE + 8
+      if (k === TileKind.Spikes) spikeX = Number.isNaN(spikeX) ? x : closerX(spikeX, x)
+      else ventX = Number.isNaN(ventX) ? x : closerX(ventX, x)
     }
   }
-  if (clank) sfxClank()
+  if (!Number.isNaN(spikeX)) sfx('spikes', spikeX)
+  if (!Number.isNaN(ventX)) sfx('vent', ventX)
+
+  stepFire()
+  stepIce()
 }
 
 /** What the floor does to whoever is standing on it, once everyone has moved. */
@@ -1870,15 +2813,25 @@ function step(inputs: Input[]) {
   advanceMovers()
 
   for (const p of players) {
+    if (p.gone) continue
     const raw = inputs[p.id]
-    const inp = throughTurn(p, raw)
+    let inp = throughTurn(p, raw)
     if (p.state === 'dead') {
-      if (--p.respawnT <= 0) respawn(p)
+      // A lost life respawns after the delay; an eliminated player waits for the next round.
+      if ((!match.on || p.lives > 0) && --p.respawnT <= 0) respawn(p)
       continue
     }
     if (p.dashCd > 0) p.dashCd--
     if (p.invuln > 0) p.invuln--
+    if (p.spawnProtect > 0) p.spawnProtect--
     if (p.throwRec > 0) p.throwRec--
+    // the spawn-in drop (render-only): the body lands SPAWN_LAND ticks before it stands up
+    if (p.spawnT > 0 && --p.spawnT === SPAWN_LAND) {
+      vfx.ring(p.x, p.y, 3, 14, PLAYER_COLORS[p.color], 10, 0.5)
+      vfx.dust(p.x, p.y, 8, look.dust, 1)
+      sfx('spawnLand', p.x)
+    }
+    const speedy = hasPower(p, 'speed')
     if (p.anim !== 'none') {
       // the reach is refreshed every tick the boomerang is still closing in; the others just run out
       const dur = p.anim === 'throw' ? THROW_ANIM : p.anim === 'catch' ? CATCH_ANIM : p.anim === 'roll' ? ROLL_ANIM : REACH_TTL
@@ -1914,7 +2867,9 @@ function step(inputs: Input[]) {
       }
     }
     if (p.state === 'idle') {
-      if (inp.dash && p.dashCd === 0) {
+      if (inp.dash && p.dashCd === 0 && hasPower(p, 'blink') && !p.held && blink(p)) {
+        // the dash button blinked you to your boomerang instead of rolling (blink sets the cooldown)
+      } else if (inp.dash && p.dashCd === 0) {
         const [dx, dy] = len(inp.mx, inp.my) > 0.1 ? norm(inp.mx, inp.my) : [p.aimX, p.aimY]
         p.state = 'dash'
         p.stateT = 0
@@ -1924,13 +2879,16 @@ function step(inputs: Input[]) {
         p.dashY = dy
         p.slideX = p.slideY = 0 // a new dash takes over whatever the last one left
         p.invuln = Math.max(p.invuln, DASH_INVULN)
-        p.dashCd = DASH_COOLDOWN
+        p.dashCd = speedy ? SPEED_DASH_CD : DASH_COOLDOWN
+        vfx.dust(p.x, p.y, 5, look.dust, 0.9, -dx, -dy) // kicked off behind the feet
+        sfx('dash', p.x)
       } else if (inp.melee) {
         p.state = 'melee'
         p.stateT = 0
         p.anim = 'none'
         p.meleeHits.clear()
         slashes.push({ x: p.x, y: p.y, ax: p.aimX, ay: p.aimY, color: PLAYER_COLORS[p.color], ttl: 7, max: 7 })
+        sfx('swing', p.x)
       } else if (inp.throw && p.held && p.throwRec === 0) {
         throwBoomerang(p)
       }
@@ -1946,7 +2904,7 @@ function step(inputs: Input[]) {
       // ice: the heading no longer snaps; the stick only leans on a velocity that friction slowly
       // bleeds, so turning takes a while and letting go coasts
       const il = len(inp.mx, inp.my)
-      const mult = p.state === 'melee' ? MELEE_SPEED_MULT : 1
+      const mult = (p.state === 'melee' ? MELEE_SPEED_MULT : 1) * (speedy ? SPEED_MULT : 1)
       p.vx *= ICE_FRICTION
       p.vy *= ICE_FRICTION
       if (il > 0.1) {
@@ -1968,7 +2926,7 @@ function step(inputs: Input[]) {
       p.windup = 0
     } else {
       const il = len(inp.mx, inp.my)
-      const mult = p.state === 'melee' ? MELEE_SPEED_MULT : 1
+      const mult = (p.state === 'melee' ? MELEE_SPEED_MULT : 1) * (speedy ? SPEED_MULT : 1)
       if (il > 0.1) {
         const [ix, iy] = norm(inp.mx, inp.my)
         const cur = len(p.vx, p.vy)
@@ -1978,7 +2936,7 @@ function step(inputs: Input[]) {
           // out of a dash: you are moving, just not where you want)
           p.windup++
           p.moving = true
-          if (p.windup === 1 || p.windup === 3) spawnBurst(p.x - ix * 3, p.y, PAL.boneDark, 2, 0.4)
+          if (p.windup === 1 || p.windup === 3) vfx.dust(p.x - ix * 3, p.y, 2, look.dust, 0.4, -ix, -iy)
         } else {
           // heading follows the input with no inertia; only the speed ramps
           const sp = Math.min(MAX_SPEED * mult, cur + ACCEL)
@@ -1999,17 +2957,18 @@ function step(inputs: Input[]) {
     }
     if (p.moving) {
       p.walkT++
+      // speed: a puff of yellow dust off the heels every few steps, so the extra pace reads from across the room
+      if (speedy && p.state !== 'dash' && p.walkT % 4 === 0) vfx.sparks(p.x - p.vx * 2, p.y, PAL.flameY, 1, 0.5, 1)
       // a crawling character dabs the floor behind it as it goes (not while hidden in grass)
-      if (CHARACTERS[p.char].leavesTrail && showsWalk(p) && p.walkT % SMEAR_EVERY === 0 && !inGrass(p.x, p.y)) {
-        smears.push({
-          x: p.x + (rng() - 0.5) * 6,
-          y: p.y + (rng() - 0.5) * 2,
-          w: 2 + Math.floor(rng() * 2),
-          ttl: SMEAR_TTL,
-          max: SMEAR_TTL,
-          color: darken(PLAYER_COLORS[p.color], 0.4),
-        })
+      const art = CHARACTERS[p.char]
+      if (art.landingFrame !== undefined && art.runTicks && showsWalk(p) &&
+          timedFrame(p.walkT, art.runTicks) === art.landingFrame && timedFrame(p.walkT - 1, art.runTicks) !== art.landingFrame) {
+        vfx.dust(p.x, p.y, 3, look.dust, 0.45, -p.vx, -p.vy)
       }
+      if (CHARACTERS[p.char].leavesTrail && showsWalk(p) && p.walkT % SMEAR_EVERY === 0 && !inGrass(p.x, p.y)) {
+        vfx.decal('smear', p.x + (vfx.rng() - 0.5) * 6, p.y + (vfx.rng() - 0.5) * 2, darken(PLAYER_COLORS[p.color], 0.4), { w: 2 + Math.floor(vfx.rng() * 2), ttl: SMEAR_TTL })
+      }
+      footsteps(p, ice)
     }
 
     // a platform you stood on carries you first
@@ -2050,11 +3009,17 @@ function step(inputs: Input[]) {
       p.state = 'idle'
       p.slideX = p.slideY = 0
       p.vx = p.vy = 0
-      spawnBurst(p.x + p.dashX * 5, p.y - 4 + p.dashY * 5, PAL.boneDark, 5, 1)
+      // into a wall at speed: dust off it and a bump
+      vfx.dust(p.x + p.dashX * 5, p.y + p.dashY * 5, 6, look.dust, 1, -p.dashX, -p.dashY)
+      shakeAt(p.x, 1, 4)
     }
     if (p.slideX !== 0 || p.slideY !== 0) {
       const ss = len(p.slideX, p.slideY)
-      if (ss > 1 && tick % 3 === 0) spawnBurst(p.x - (p.slideX / ss) * 4, p.y - (p.slideY / ss) * 4, PAL.boneDark, 1, 0.3) // skid dust
+      if (ss > 1 && tick % 3 === 0) {
+        // skidding: dust behind the feet, or a scratch in the ice
+        if (ice) vfx.decal('scratch', p.x + (vfx.rng() - 0.5) * 4, p.y + 1, PAL.iceCrack, { w: 3, dx: p.slideX / ss, dy: (p.slideY / ss) * 0.6, ttl: 300 })
+        else vfx.dust(p.x - (p.slideX / ss) * 4, p.y - (p.slideY / ss) * 4, 1, look.dust, 0.3)
+      }
       const fr = ice ? ICE_FRICTION : DASH_SLIDE_FRICTION
       p.slideX *= fr
       p.slideY *= fr
@@ -2086,8 +3051,9 @@ function step(inputs: Input[]) {
       p.vx = p.vy = p.slideX = p.slideY = 0
       if (p.state === 'dash') p.state = 'idle'
       bu.hitT = tick
-      spawnBurst(p.x, p.y - 4, PAL.white, 3, 0.8)
-      if (near(bu.x)) sfxBump()
+      vfx.sparks(p.x, p.y - 4, PAL.white, 4, 1.2, 4, nx, ny)
+      vfx.ring(bu.x, bu.y - 2, BUMPER_RADIUS, BUMPER_RADIUS + 6, PAL.white, 6, 0.8)
+      sfx('bumper', bu.x, { pitch: 0.8 }) // a body is bigger than a boomerang: lower
     }
     for (const ct of carts) {
       const dx = p.x - ct.pos.x
@@ -2116,7 +3082,7 @@ function step(inputs: Input[]) {
         p.state = 'idle'
         p.vx = p.vy = 0
       }
-      spawnBurst(p.x, p.y - 4, PAL.boneDark, 3, 0.8)
+      vfx.dust(p.x, p.y, 3, look.dust, 0.8, sx, sy)
     }
 
     // knockback ignores pits (that's how you fall in)
@@ -2125,6 +3091,7 @@ function step(inputs: Input[]) {
       if (thrown) enterPortal(p, thrown, raw)
       moveX(p, p.kbx, PLAYER_RADIUS, isSolid)
       moveY(p, p.kby, PLAYER_RADIUS, isSolid)
+      // on ice (the room's or a laid trail) a shove carries further: push them somewhere they shouldn't go
       const decay = onIce(p.x, p.y) ? KB_DECAY_ICE : KB_DECAY
       p.kbx *= decay
       p.kby *= decay
@@ -2151,15 +3118,17 @@ function step(inputs: Input[]) {
       const minD = PLAYER_RADIUS * 2
       if (d >= minD || d < 1e-6) continue
       const [nx, ny] = norm(dx, dy)
-      if (a.state === 'dash' && b.state !== 'dash') {
+      if (a.state === 'dash' && b.state !== 'dash' && b.spawnProtect === 0 && !isAlly(a.id, b)) {
         b.kbx += a.dashX * SHOVE_IMPULSE
         b.kby += a.dashY * SHOVE_IMPULSE
         b.lastShover = a.id
+        if (b.lastShoveT < tick - 1) sfx('shove', b.x) // the first tick of contact, not every tick of it
         b.lastShoveT = tick
-      } else if (b.state === 'dash' && a.state !== 'dash') {
+      } else if (b.state === 'dash' && a.state !== 'dash' && a.spawnProtect === 0 && !isAlly(b.id, a)) {
         a.kbx += b.dashX * SHOVE_IMPULSE
         a.kby += b.dashY * SHOVE_IMPULSE
         a.lastShover = b.id
+        if (a.lastShoveT < tick - 1) sfx('shove', a.x)
         a.lastShoveT = tick
       }
       const push = (minD - d) / 2
@@ -2177,7 +3146,8 @@ function step(inputs: Input[]) {
   for (const b of booms) {
     b.spin++
     if (b.fire > 0) b.fire--
-    const owner = players[b.owner]
+    const owner = playerById(b.owner)!
+    if (!owner.holdThrow) b.hoverReady = true
     if (b.state === 'dropped') {
       b.vx *= DROP_FRICTION
       b.vy *= DROP_FRICTION
@@ -2212,11 +3182,11 @@ function step(inputs: Input[]) {
       // a boomerang is never lost to a pit: it turns up on the nearest floor
       if (overPit(b.x, b.y)) {
         const f = nearestFloor(b.x, b.y)
-        spawnBurst(b.x, b.y, PAL.boneDark, 4, 0.8)
+        vfx.dust(b.x, b.y, 3, look.dust, 0.6)
         b.x = f.x
         b.y = f.y
         b.vx = b.vy = 0
-        spawnBurst(b.x, b.y, PLAYER_COLORS[owner.color], 4, 0.8)
+        vfx.ring(b.x, b.y, 1, 7, PLAYER_COLORS[owner.color], 8, 0.5)
       }
       // pickup
       for (const p of players) {
@@ -2226,7 +3196,6 @@ function step(inputs: Input[]) {
           startCatchAnim(p)
           b.owner = p.id
           b.flight = -1
-          spawnBurst(b.x, b.y - 4, PLAYER_COLORS[p.color], 4, 0.8)
           break
         }
       }
@@ -2236,12 +3205,28 @@ function step(inputs: Input[]) {
     b.flight++
     b.trail.unshift({ x: b.x, y: b.y })
     if (b.trail.length > 7) b.trail.pop()
+    // a big boomerang smashes a tile either side of its line as it goes
+    if (b.powers.has('big')) wreckNear(b.x, b.y, 14, b.owner, { crates: true, barrels: true, grass: true })
 
+    if (b.hovering && !owner.holdThrow) b.hoverReleased = true
+    const hover = !b.hoverUsed && owner.state !== 'dead' && owner.holdThrow && b.hoverReady && !b.armed && !b.phantom
+    if (hover && (b.state === 'out' || b.state === 'return')) {
+      b.hovering = true
+      b.hoverUsed = true
+      b.brakeT = BOOM_HOVER_BRAKE
+    }
     if (b.state === 'out') {
-      if (flyOutbound(b, true)) {
+      const brake = b.brakeT > 0 ? len(b.vx, b.vy) / b.brakeT-- : 0
+      if (flyOutbound(b, true, brake)) {
+        b.brakeT = 0
+        // the return pass can take anyone the throw missed
         b.hit.clear()
+        // a bomb boomerang goes off where it stops, then comes back as normal (an own-deflect
+        // fuse, if it is armed, takes over and this blast doesn't happen)
+        if (b.powers.has('bomb') && !b.armed) blast(b.x, b.y, BOMB_HIT_RADIUS, BOMB_RADIUS, b.owner, `P${b.owner}'s bomb`)
         // an armed boomerang sits on its fuse whatever happened to its owner; the blast is posthumous
-        if (owner.state === 'dead' && !b.armed) b.state = 'dropped'
+        if (b.phantom) popPhantom(b)
+        else if (owner.state === 'dead' && !b.armed) b.state = 'dropped'
         else {
           b.state = 'hang'
           b.hangT = 0
@@ -2257,22 +3242,20 @@ function step(inputs: Input[]) {
       } else if (owner.state === 'dead') b.state = 'dropped'
       else {
         b.hangT++
-        // the throw button held keeps it hanging up there (still lethal) until let go or the cap
-        const hover = owner.holdThrow && b.hangT < BOOM_HOVER_MAX
-        if (b.hangT >= BOOM_HANG && !hover) {
+        if (owner.holdThrow && !b.hoverUsed) {
+          b.hovering = true
+          b.hoverUsed = true
+        }
+        const holding = b.hovering && !b.hoverReleased && owner.holdThrow && b.hangT < BOOM_HOVER_MAX
+        if (!holding && (b.hovering || b.hangT >= BOOM_HANG)) {
           b.state = 'return'
-          if (b.hangT > BOOM_HANG) {
-            // it was hovering: recalled at full speed from the first tick, not the gradual return
-            b.recall = true
-            const [tx, ty] = norm(owner.x - b.x, owner.y - 6 - b.y)
-            b.vx = tx * BOOM_RECALL_SPEED
-            b.vy = ty * BOOM_RECALL_SPEED
-          }
+          b.hovering = false
+          b.vx = b.vy = 0
         }
       }
     } else {
       // returning: accelerates out of the hang straight at its owner at the rate it slowed on the way
-      // out (a recall holds full speed instead), flies over obstacles, homes hard
+      // out. A hover brakes to zero first; it flies over obstacles and homes hard.
       if (owner.state === 'dead') {
         b.state = 'dropped'
       } else {
@@ -2280,17 +3263,24 @@ function step(inputs: Input[]) {
         const oy = owner.y - 6 - b.y
         const d = len(ox, oy)
         const [tx, ty] = norm(ox, oy)
-        const sp = Math.min(Math.max(len(b.vx, b.vy) + b.decel, b.recall ? BOOM_RECALL_SPEED : 0), BOOM_RETURN_SPEED)
+        const braking = b.brakeT > 0
+        const sp = braking ? len(b.vx, b.vy) * (1 - 1 / b.brakeT--) : Math.min(len(b.vx, b.vy) + b.decel, BOOM_RETURN_SPEED)
         const turn = (d < BOOM_NEAR_DIST ? BOOM_TURN_NEAR : BOOM_TURN) * sp + b.decel
-        const dvx = tx * sp - b.vx
-        const dvy = ty * sp - b.vy
+        const [dx, dy] = braking ? norm(b.vx, b.vy) : [tx, ty]
+        const dvx = dx * sp - b.vx
+        const dvy = dy * sp - b.vy
         const dl = len(dvx, dvy)
-        const k = dl > turn ? turn / dl : 1
+        const k = !braking && dl > turn ? turn / dl : 1
         b.vx += dvx * k
         b.vy += dvy * k
         b.x += b.vx
         b.y += b.vy
         passTile(b)
+        if (braking && b.brakeT === 0) {
+          b.vx = b.vy = 0
+          b.state = 'hang'
+          b.hangT = 0
+        }
         const dNow = len(owner.x - b.x, owner.y - 6 - b.y)
         // the owner reaches for it while it's about two ticks out, hands empty and body free
         if (dNow < CATCH_REACH && !owner.held && owner.state === 'idle' && (owner.anim === 'none' || owner.anim === 'reach')) {
@@ -2303,6 +3293,7 @@ function step(inputs: Input[]) {
             startCatchAnim(owner)
             b.flight = -1
           } else {
+            // hands full: it drops at your feet
             b.state = 'dropped'
             b.vx = b.vy = 0
           }
@@ -2315,11 +3306,13 @@ function step(inputs: Input[]) {
     // lethality: anything airborne kills, including a boomerang hanging at the top of its throw
     if (b.state !== 'dropped') {
       const sp = len(b.vx, b.vy)
+      const reach = boomHitR(b) + HURT_RADIUS
       for (const p of players) {
-        if (p.id === b.owner || p.state === 'dead' || p.invuln > 0 || b.hit.has(p.id)) continue
-        if (len(p.x - b.x, p.y - 6 - b.y) < BOOM_RADIUS + HURT_RADIUS) {
+        if (p.id === b.owner || isAlly(b.owner, p) || p.state === 'dead' || p.invuln > 0 || b.hit.has(p.id)) continue
+        if (len(p.x - b.x, p.y - 6 - b.y) < reach) {
           b.hit.add(p.id)
           const [kx, ky] = sp > 1e-6 ? [b.vx / sp, b.vy / sp] : [p.x - b.x, p.y - b.y]
+          if (tryShield(p, kx, ky)) continue
           killSlice(p, kx, ky, b.owner)
         }
       }
@@ -2336,10 +3329,10 @@ function step(inputs: Input[]) {
     const hx = p.x + p.aimX * MELEE_REACH
     const hy = p.y + p.aimY * MELEE_REACH
     for (const b of booms) {
-      if (b.state === 'dropped') continue
+      if (b.state === 'dropped' || isAlly(b.owner, p)) continue
       const key = `b${booms.indexOf(b)}`
       if (p.meleeHits.has(key)) continue
-      if (len(b.x - hx, b.y - 6 - hy) < MELEE_RADIUS + BOOM_RADIUS) {
+      if (len(b.x - hx, b.y - 6 - hy) < MELEE_RADIUS + boomHitR(b)) {
         p.meleeHits.add(key)
         deflect(b, p)
       }
@@ -2351,27 +3344,22 @@ function step(inputs: Input[]) {
       wreckNear(hx, hy, MELEE_RADIUS + 4, p.id, { crates: true, barrels: true, grass: true })
     }
     for (const q of players) {
-      if (q.id === p.id || q.state === 'dead' || q.invuln > 0) continue
+      if (q.id === p.id || isAlly(p.id, q) || q.state === 'dead' || q.invuln > 0) continue
       const key = `p${q.id}`
       if (p.meleeHits.has(key)) continue
       if (len(q.x - hx, q.y - hy) < MELEE_RADIUS + HURT_RADIUS) {
         p.meleeHits.add(key)
+        if (tryShield(q, p.aimX, p.aimY)) continue
         killSlice(q, p.aimX, p.aimY, p.id)
       }
     }
   }
 
-  // effects
-  for (const pt of particles) {
-    pt.x += pt.vx
-    pt.y += pt.vy
-    pt.vx *= 0.9
-    pt.vy = pt.vy * 0.9 + 0.08
-    pt.ttl--
-  }
-  particles = particles.filter((pt) => pt.ttl > 0)
-  for (const s of smears) s.ttl--
-  smears = smears.filter((s) => s.ttl > 0)
+  stepPickups()
+
+  // effects: render-only, nothing above reads them
+  stepAtmosphere()
+  vfx.step(tick)
   for (const h of halves) {
     h.x += h.vx
     h.y += h.vy
@@ -2391,8 +3379,8 @@ function step(inputs: Input[]) {
 }
 
 // ---------------------------------------------------------------- rendering
-const ctx = screen.ctx
-let lightmap = new Lightmap(W, WORLD_H)
+let ctx!: CanvasRenderingContext2D
+let lightmap!: Lightmap
 
 interface Drawable {
   y: number
@@ -2400,7 +3388,7 @@ interface Drawable {
 }
 
 function camTarget(): number {
-  return Math.max(0, Math.min(WORLD_W - W, players[0].x - W / 2))
+  return Math.max(0, Math.min(WORLD_W - W, local().x - W / 2))
 }
 
 /** Ease the view after the local player; snap for scripted frames or after a long jump (a respawn). */
@@ -2413,18 +3401,30 @@ function updateCamera(snap: boolean) {
   if (snap || Math.abs(t - camX) > 240) camX = t
   else camX += (t - camX) * CAM_LERP
 }
-updateCamera(true)
 
 // ---------------------------------------------------------------- arena cycling
 /**
- * Loads the next (1) or previous (-1) roster room in place of the current one and re-seats everyone
- * at its spawns with a fresh score: Tab, Shift+Tab or the < > arrows in the HUD. From the strip or
- * the old layouts, forwards goes to the first room and back to the last.
+ * Practice: loads the next (1) or previous (-1) roster room in place of the current one and re-seats
+ * everyone at its spawns with a fresh score: Tab, Shift+Tab or the < > arrows in the HUD. From the
+ * strip or the old layouts, forwards goes to the first room and back to the last.
  */
 function switchArena(dir: 1 | -1) {
   const n = ARENA_LIST.length
-  arenaIndex = arenaIndex < 0 ? (dir > 0 ? 0 : n - 1) : (arenaIndex + dir + n) % n
+  enterRoom(arenaIndex < 0 ? (dir > 0 ? 0 : n - 1) : (arenaIndex + dir + n) % n, true)
+  // the URL follows, so a reload comes back to this room; ?at= only ever named a strip tile
+  params.set('arena', ARENA_LIST[arenaIndex].key)
+  params.delete('at')
+  history.replaceState(null, '', `?${params}`)
+}
+
+/**
+ * Loads roster room `index` and re-seats everyone at its spawns (shuffled in a match). The scores
+ * reset when asked (a room swap in practice, a rematch), stay otherwise (the next round of a match).
+ */
+function enterRoom(index: number, resetScores: boolean) {
+  arenaIndex = index
   const entry = ARENA_LIST[arenaIndex]
+  arenaName = entry.key
   loadArena(entry)
   screen.resize(W, H)
   if (lightmap.w !== W || lightmap.h !== WORLD_H) lightmap = new Lightmap(W, WORLD_H)
@@ -2433,26 +3433,36 @@ function switchArena(dir: 1 | -1) {
   spikeB = cyclePhase(0, half(SPIKE_CYCLE), SPIKE_CYCLE)
   ventA = cyclePhase(0, 0, VENT_CYCLE)
   ventB = cyclePhase(0, half(VENT_CYCLE), VENT_CYCLE)
+  deathSlowT = 0
+  music.clearDeathSlow()
   booms = []
-  particles = []
   halves = []
   sinks = []
   afterimages = []
   slashes = []
   blasts = []
-  smears = []
   eventLog.length = 0
+  if (match.on) shuffleSpawns()
+  else spawnOrder = []
   for (const p of players) {
-    const sp = arena.spawns[p.id] ?? arena.spawns[0] ?? { c: 3, r: 3 }
-    p.spawnX = sp.c * TILE + 8
-    p.spawnY = sp.r * TILE + 8
+    const sp = spawnFor(p.id)
+    p.spawnX = sp.x
+    p.spawnY = sp.y
+    if (resetScores) p.score = p.kills = 0
+    if (p.gone) {
+      // left the match: parked at its spawn, dead, out of everyone's way
+      p.x = sp.x
+      p.y = sp.y
+      continue
+    }
     respawn(p)
-    p.score = 0
     p.vx = p.vy = p.kbx = p.kby = 0
     p.cursorX = p.x + 60
     p.cursorY = p.y
     p.plat = -1
     p.meleeHits.clear()
+    p.powers.length = 0
+    if (p.id === localId) for (const k of giveList) givePower(p, k)
     if (p.ai) {
       p.ai.tx = p.x
       p.ai.ty = p.y
@@ -2460,11 +3470,301 @@ function switchArena(dir: 1 | -1) {
     }
   }
   updateCamera(true)
-  // the URL follows, so a reload comes back to this room; ?at= only ever named a strip tile
-  params.set('arena', entry.key)
-  params.delete('at')
-  history.replaceState(null, '', `?${params}`)
+  // the room's own song (docs/07 §6), the continuous sounds of the old room cut
+  stopLoops()
+  music.playRoom(entry.key)
   document.title = pageTitle()
+}
+
+// ---------------------------------------------------------------- match flow (docs/01 §10)
+type Phase = 'intro' | 'play' | 'end' | 'over'
+const MATCH_INTRO = 90 // arena intro 30 + READY 60, nobody can move
+const ROUND_END_TICKS = 45 // the sim freezes on the last kill and the winner is called
+const RESULTS_HOLD = 90 // the podium stays up at least this long before a rematch can be called
+const match = {
+  on: false,
+  phase: 'play' as Phase,
+  phaseT: 0,
+  /** ticks of play this round, for the timer */
+  roundTick: 0,
+  round: 0,
+  target: 5,
+  lives: 3,
+  gameMode: 'ffa' as MatchKind,
+  rooms: 'cycle' as RoomOrder,
+  /** roster index of the first room; a rematch starts over from it */
+  startIndex: 0,
+  /** who took the last round, -1 for a draw */
+  lastWinner: -1,
+}
+/** Big centred words over the world for a moment: GO, who took the round, DRAW. Ticked by advance() so stills age it too; never read by the sim. */
+let callout: { text: string; color: string; ttl: number; max: number } | null = null
+function say(text: string, color: string, ttl: number) {
+  callout = { text, color, ttl, max: ttl }
+}
+/** Small lines under the HUD that fade: who left. Render-only. */
+const notices: { text: string; ttl: number }[] = []
+function notice(text: string) {
+  notices.push({ text, ttl: 240 })
+}
+
+function startMatch(target: number, rooms: RoomOrder, startIndex: number, lives: number, gameMode: MatchKind = 'ffa') {
+  match.on = true
+  match.target = target
+  match.lives = roundLives(lives)
+  match.gameMode = gameMode
+  match.rooms = rooms
+  match.startIndex = startIndex
+  resetMatch()
+}
+
+/** Scores to zero, back to the first room, round one: the start and every rematch. */
+function resetMatch() {
+  for (const p of players) p.score = p.kills = 0
+  match.round = 0
+  enterRoom(match.startIndex, true)
+  beginRound()
+}
+
+function beginRound() {
+  for (const p of players) p.lives = p.gone ? 0 : match.lives
+  match.round++
+  match.phase = 'intro'
+  match.phaseT = 0
+  match.roundTick = 0
+  callout = null
+}
+
+function inGame(): Player[] {
+  return players.filter((p) => !p.gone)
+}
+function isAlly(attacker: number, p: Player): boolean {
+  return match.on && match.gameMode === 'teams' && attacker !== p.id && playerById(attacker)?.team === p.team
+}
+function side(p: Player): number { return match.gameMode === 'teams' ? p.team : p.id }
+function sidesLeft(): number[] { return [...new Set(inGame().filter(p => p.lives > 0).map(side))] }
+function sideName(p: Player): string { return match.gameMode === 'teams' ? TEAM_NAMES[p.team] + ' TEAM' : displayName(p) }
+function displayName(p: Player): string {
+  return p.name || `P${p.id + 1}`
+}
+
+const NEUTRAL_INPUT: Input = { mx: 0, my: 0, throw: false, melee: false, dash: false, hold: false, cursorX: 0, cursorY: 0 }
+/** Nobody does anything, cursors where they were: the intro, and anyone whose input never came. */
+function neutralFor(p: Player): Input {
+  return { ...NEUTRAL_INPUT, cursorX: p.cursorX, cursorY: p.cursorY }
+}
+
+/**
+ * One tick of the game: step() wrapped in the match phases, so every client of a lockstep session
+ * runs exactly this on every tick. `inputs` is only asked for in a phase that uses them, so the
+ * bots' rng draws happen on the same ticks everywhere.
+ */
+function advance(inputs: () => Input[]) {
+  if (deathSlowT > 0) deathSlowT--
+  if (callout && --callout.ttl <= 0) callout = null
+  if (!match.on) {
+    step(inputs())
+    return
+  }
+  switch (match.phase) {
+    case 'intro': {
+      match.phaseT++
+      const still: Input[] = []
+      for (const p of players) still[p.id] = neutralFor(p)
+      step(still)
+      if (match.phaseT === MATCH_INTRO - 60) sfx('ready', local().x)
+      if (match.phaseT >= MATCH_INTRO) {
+        match.phase = 'play'
+        match.roundTick = 0
+        say('GO', PAL.cream, 30)
+      }
+      break
+    }
+    case 'play': {
+      step(inputs())
+      match.roundTick++
+      // A dead player awaiting respawn is still a contender. Only exhausted lives end a round.
+      const live = inGame().filter((p) => p.lives > 0)
+      if (players.length >= 2 && sidesLeft().length <= 1) endRound(live[0]?.id ?? -1)
+      break
+    }
+    case 'end':
+      match.phaseT++
+      if (match.phaseT >= ROUND_END_TICKS) {
+        if (players.some((p) => p.score >= match.target) || new Set(inGame().map(side)).size < 2) {
+          match.phase = 'over'
+          match.phaseT = 0
+          callout = null
+          sfx('win', local().x)
+        } else {
+          enterRoom(match.rooms === 'cycle' ? (arenaIndex + 1) % ARENA_LIST.length : arenaIndex, false)
+          beginRound()
+        }
+      }
+      break
+    case 'over':
+      match.phaseT++
+      break
+  }
+}
+
+function endRound(winner: number) {
+  match.phase = 'end'
+  match.phaseT = 0
+  match.lastWinner = winner
+  const w = winner >= 0 ? playerById(winner) : undefined
+  if (w) {
+    for (const p of players) if (side(p) === side(w)) p.score++
+    say(`${sideName(w)} TAKES THE ROUND`, PLAYER_COLORS[w.color], ROUND_END_TICKS + 20)
+    eventLog.push(`t${tick} round ${match.round} to P${w.id}`)
+  } else {
+    say('DRAW', PAL.bone, ROUND_END_TICKS + 20)
+    eventLog.push(`t${tick} round ${match.round} drawn`)
+  }
+}
+
+/** The podium's order: rounds won, then kills, then slot (docs/01 §10). */
+function standings(): Player[] {
+  return inGame()
+    .concat(players.filter((p) => p.gone))
+    .sort((a, b) => b.score - a.score || (match.gameMode === 'teams' ? a.team - b.team : 0) || b.kills - a.kills || a.id - b.id)
+}
+
+/** Enter on the results: the host (or the one player of an offline match) calls the rematch for everyone. */
+function requestRematch() {
+  if (!match.on || match.phase !== 'over' || match.phaseT < RESULTS_HOLD) return
+  if (net) {
+    if (net.role === 'host') net.command('rematch')
+  } else resetMatch()
+}
+
+/** A host command that rode in on a lockstep bundle; every client applies it on the same tick. */
+function applyCmd(c: string) {
+  if (c === 'rematch') resetMatch()
+  else if (c.startsWith('leave:')) removePlayer(Number(c.slice(6)))
+}
+
+/** A player left the match: dead for good, their boomerang and any credit they were owed gone with them. */
+function removePlayer(id: number) {
+  const p = playerById(id)
+  if (!p || p.gone) return
+  p.gone = true
+  if (p.state !== 'dead') {
+    p.state = 'dead'
+    p.held = false
+    p.powers.length = 0
+  }
+  p.lives = 0
+  p.respawnT = 1e9
+  booms = booms.filter((b) => b.owner !== id)
+  for (const i of fireList) if (fireBy[i] === id) fireBy[i] = -1
+  for (const i of iceList) if (iceBy[i] === id) iceBy[i] = -1
+  for (const q of players) if (q.lastShover === id) q.lastShover = -1
+  vfx.smoke(p.x, p.y, 6, '#2a2230', 6, 4)
+  eventLog.push(`t${tick} P${id} left`)
+  notice(`${displayName(p)} LEFT`)
+}
+
+// ---------------------------------------------------------------- lockstep (docs/05 §4, §7)
+let net: NetSession | null = null
+/** the last tick stepped from a bundle */
+let netTick = 0
+/** frames spent waiting for the next bundle, for the WAITING notice */
+let stallT = 0
+
+/**
+ * One tick of lockstep: step the next bundle if it is here, else wait. Exactly one tick per call:
+ * the real-time accumulator in the loop decides how many ticks are due, and the net only gates
+ * them. (A "catch-up" that steps extra ticks whenever bundles are queued feeds itself, because each
+ * tick stepped also submits an input, and the match runs away at two or three times speed.)
+ */
+function netStep() {
+  const n = net!
+  const ti = n.take(netTick + 1)
+  if (!ti) {
+    stallT++
+    // No bundles may arrive until a hidden peer steps its queued inputs. Only visible clients
+    // initiate this wake-up; hidden peers responding with wakes would create a feedback loop.
+    if (!document.hidden) n.wakePeers()
+    return false
+  }
+  stallT = 0
+  netTick++
+  for (const c of ti.cmds) applyCmd(c)
+  advance(() => {
+    const inputs: Input[] = []
+    for (const p of players) inputs[p.id] = p.ai ? aiInput(p) : ti.inputs[p.id] ?? neutralFor(p)
+    return inputs
+  })
+  // our input for a tick `delay` ahead, so the host has it by the time that tick is due
+  n.submitLocal(netTick + n.delay, readLocalInput())
+  if (netTick % HASH_EVERY === 0) {
+    const h = stateHash()
+    n.reportHash(netTick, h)
+    // ?test=…: one greppable line per hash, so two headless browsers can be compared (docs/05 §8)
+    if (params.has('test')) {
+      console.log(`NET t${netTick} hash ${h} players ${players.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}`)
+      console.log(`NET booms t${netTick} ${boomTrace()}`)
+    }
+  }
+  if (params.has('test') && n.desyncTick >= 0 && !desyncLogged) {
+    desyncLogged = true
+    console.log(`NET desync at t${n.desyncTick}`)
+  }
+  return true
+}
+let desyncLogged = false
+
+/** Flight details shared by the scripted and two-browser diagnostics. */
+function boomTrace(): string {
+  return booms
+    .map((b) => `P${b.owner} ${b.state}${b.state === 'hang' ? b.hangT : ''}${b.brakeT > 0 ? '(brake)' : b.hovering ? '(hover)' : ''}${b.armed ? '*' : ''} ${b.x.toFixed(1)},${b.y.toFixed(1)} v=${len(b.vx, b.vy).toFixed(2)}`)
+    .join(' | ')
+}
+
+const hashF64 = new Float64Array(1)
+const hashU32 = new Uint32Array(hashF64.buffer)
+function mixNum(h: number, v: number): number {
+  hashF64[0] = v
+  h = Math.imul(h ^ hashU32[0], 0x9e3779b1)
+  h = Math.imul(h ^ (h >>> 15) ^ hashU32[1], 0x85ebca77)
+  return h ^ (h >>> 13)
+}
+/** A 32-bit digest of the simulation the session compares across clients every HASH_EVERY ticks. Nothing render-side goes in. */
+function stateHash(): number {
+  let h = 0x811c9dc5 ^ tick
+  h = mixNum(h, match.phase === 'play' ? 1 : match.phase === 'intro' ? 2 : match.phase === 'end' ? 3 : 4)
+  h = mixNum(h, match.roundTick)
+  h = mixNum(h, match.lives)
+  h = mixNum(h, match.gameMode === 'teams' ? 1 : 0)
+  h = mixNum(h, deathSlowT)
+  for (const p of players) {
+    h = mixNum(h, p.x)
+    h = mixNum(h, p.y)
+    h = mixNum(h, p.vx)
+    h = mixNum(h, p.vy)
+    h = mixNum(h, p.team)
+    h = mixNum(h, p.invuln)
+    h = mixNum(h, p.spawnProtect)
+    h = mixNum(h, p.lives)
+    h = mixNum(h, p.respawnT)
+    h = mixNum(h, p.slideX)
+    h = mixNum(h, p.slideY)
+    const st = p.state === 'dead' ? 1 : p.state === 'dash' ? 2 : p.state === 'melee' ? 3 : 0
+    h = mixNum(h, st + p.score * 8 + p.kills * 256 + (p.held ? 4096 : 0) + p.powers.length * 8192 + (p.gone ? 65536 : 0))
+  }
+  for (const b of booms) {
+    h = mixNum(h, b.x)
+    h = mixNum(h, b.y)
+    h = mixNum(h, b.vx)
+    h = mixNum(h, b.vy)
+    h = mixNum(h, b.owner)
+    h = mixNum(h, b.state === 'out' ? 0 : b.state === 'hang' ? 1 : b.state === 'return' ? 2 : 3)
+    h = mixNum(h, b.hangT)
+    h = mixNum(h, (b.hovering ? 1 : 0) + (b.hoverReady ? 2 : 0) + (b.hoverUsed ? 4 : 0) + (b.hoverReleased ? 8 : 0))
+    h = mixNum(h, b.brakeT)
+  }
+  return h >>> 0
 }
 function pageTitle(): string {
   return `Boomerangeon — ${arenaEntry()?.title ?? arenaName}`
@@ -2488,11 +3788,31 @@ function drawSpriteScaled(s: Sprite, cx: number, cy: number, scale: number, alph
   ctx.globalAlpha = 1
 }
 
+/** A sprite stretched by (sx, sy) about the middle of its bottom edge: the landing squash. */
+function drawSpriteStretched(s: Sprite, cx: number, baseY: number, sx: number, sy: number, alpha = 1) {
+  if (alpha <= 0) return
+  const w = Math.max(1, Math.round(s.w * sx))
+  const h = Math.max(1, Math.round(s.h * sy))
+  ctx.imageSmoothingEnabled = false
+  ctx.globalAlpha = alpha
+  ctx.drawImage(s.img, Math.round(cx - w / 2), Math.round(baseY - h), w, h)
+  ctx.globalAlpha = 1
+}
+
+/** Rows [row0, row0 + rows) of a sprite, drawn `dy` px off their place: the idle breath folds a body this way. */
+function drawSpriteRows(s: Sprite, x: number, y: number, row0: number, rows: number, dy: number, alpha = 1) {
+  if (alpha <= 0 || rows <= 0) return
+  ctx.globalAlpha = alpha
+  ctx.drawImage(s.img, 0, row0, s.w, rows, Math.round(x), Math.round(y) + row0 + dy, s.w, rows)
+  ctx.globalAlpha = 1
+}
+
 function drawPlayer(p: Player) {
   const s = playerSprite(p)
   let alpha = 1
-  if (inGrass(p.x, p.y)) alpha = p.id === 0 ? 0.4 : 0
-  if (p.invuln > 0 && p.state !== 'dash' && (tick & 2) === 0) alpha *= 0.4
+  if (inGrass(p.x, p.y)) alpha = p.id === localId ? 0.4 : 0
+  const dropping = p.spawnT > 0
+  if (p.invuln > 0 && p.state !== 'dash' && !dropping && (tick & 2) === 0) alpha *= 0.4
   if (alpha <= 0) return
   // a run frame may lift the body off its shadow (the frog's hop, the shroom's bob); the shadow
   // stays on the ground so it reads as leaving the floor, not floating. Action poses are drawn
@@ -2500,23 +3820,48 @@ function drawPlayer(p: Player) {
   const hop = runLift(p)
   const x = Math.round(p.x) - 7
   const y = Math.round(p.y) - 17 - hop
+  if (dropping) {
+    // the spawn-in (docs/04 §5): the body falls in from above, squashes on landing, then stands up
+    if (p.spawnT > SPAWN_LAND) {
+      const f = (p.spawnT - SPAWN_LAND) / (SPAWN_DROP - SPAWN_LAND)
+      drawSprite(s, x, y - Math.round(SPAWN_HEIGHT * f * f), alpha)
+    } else {
+      const k = p.spawnT / SPAWN_LAND // 1 flattest, towards 0 upright
+      drawSpriteStretched(s, p.x, Math.round(p.y) + 1, 1 + 0.3 * k, 1 - 0.3 * k, alpha)
+    }
+    return
+  }
   // no invulnerability flash on the dash: the roll itself is the tell, as with a Dark Souls roll
-  drawSprite(s, x, y, alpha)
+  if (!CHARACTERS[p.char].idleTicks && showsWalk(p) && !p.moving && (tick + p.id * 23) % BREATHE_PERIOD < BREATHE_DIP) {
+    // the idle breath: the feet stay put and everything above the fold drops a pixel for a moment
+    // (the fold sits partway down the drawn body, so the slime breathes as well as Skully)
+    const top = spriteTop(s)
+    const fold = top + Math.round((s.h - top) * BREATHE_FOLD)
+    drawSpriteRows(s, x, y, fold, s.h - fold, 0, alpha)
+    drawSpriteRows(s, x, y, 0, fold, 1, alpha)
+  } else drawSprite(s, x, y, alpha)
   if (p.held && p.state !== 'dash' && p.anim !== 'catch' && p.anim !== 'roll') {
-    // held boomerang peeks out beside the body, opposite the aim side (the clutch frame has it baked in)
     const b = boomSets[p.color][0]
     const side = p.aimX < 0 ? 1 : -1
     drawSprite(b, p.x + side * 7 - 4, p.y - 11 - hop, alpha)
   }
+  // the power-up tells (docs/03 §7): the shield ring, and the held stack over the head
+  if (hasPower(p, 'shield')) part.drawShieldRing(ctx, p.x, p.y, tick)
+  if (p.powers.length > 0 && alpha >= 1) {
+    const w = p.powers.length * 10 - 1
+    const x0 = Math.round(p.x) - Math.floor(w / 2)
+    p.powers.forEach((k, i) => drawSprite(powerIcons[k], x0 + i * 10, y - 11, 0.9))
+  }
 }
 
 function drawBoomerang(b: Boomerang) {
-  const frames = boomSets[players[b.owner].color]
+  const owner = playerById(b.owner)!
+  const frames = boomSets[owner.color]
   const half = Math.floor(BOOM_SPRITE / 2)
   if (b.state === 'dropped') {
     const f = frames[Math.floor(b.spin / 10) & 3]
-    if (b.owner === 0 && !players[0].held) {
-      const o = sil(f, PLAYER_COLORS[0])
+    if (b.owner === localId && !owner.held) {
+      const o = sil(f, PLAYER_COLORS[owner.color])
       const pulse = (tick & 16) === 0 ? 0.9 : 0.5
       for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) drawSprite(o, b.x - half + ox, b.y - half + oy, pulse)
     }
@@ -2524,32 +3869,40 @@ function drawBoomerang(b: Boomerang) {
     return
   }
   const color = boomHue(b)
+  const hot = b.armed || b.fire > 0 || b.powers.size > 0 // a flagged boomerang trails thick, like an armed one
+  const ghost = b.phantom ? 0.7 : 1
   for (let i = b.trail.length - 1; i >= 0; i--) {
     const t = b.trail[i]
-    const a = (b.armed || b.fire > 0 ? 0.8 : 0.55) * (1 - i / b.trail.length)
+    const a = (hot ? 0.8 : 0.55) * (1 - i / b.trail.length) * ghost
     ctx.fillStyle = rgba(color, a)
-    const sz = (i < 2 ? 3 : 2) + (b.armed || b.fire > 0 ? 1 : 0)
+    const sz = (i < 2 ? 3 : 2) + (hot ? 1 : 0)
     ctx.fillRect(Math.round(t.x) - 1, Math.round(t.y) - BOOM_HEIGHT - 1, sz, sz)
   }
   const f = frames[Math.floor(b.spin / 2) & 3]
   const fuse = fusePhase(b)
-  if (fuse.scale < 1) {
-    // shrinking down on its fuse: drawn from the centre so it collapses on the spot
+  const scale = b.powers.has('big') ? BIG_SCALE * fuse.scale : fuse.scale
+  if (scale !== 1 || b.phantom) {
+    // scaled (shrinking on its fuse, or big) or ghosted: drawn from the centre so it grows and collapses on the spot
     const cx = b.x - half + f.w / 2
     const cy = b.y - half - BOOM_HEIGHT + f.h / 2
-    drawSpriteScaled(f, cx, cy, fuse.scale)
-    if (fuse.flash) drawSpriteScaled(sil(f, PAL.white), cx, cy, fuse.scale)
+    drawSpriteScaled(f, cx, cy, scale, ghost)
+    if (fuse.flash) drawSpriteScaled(sil(f, PAL.white), cx, cy, scale, ghost)
+    else if (b.phantom && (tick & 4) === 0) drawSpriteScaled(sil(f, PAL.white), cx, cy, scale, 0.35)
     return
   }
   drawSprite(f, b.x - half, b.y - half - BOOM_HEIGHT)
   if (fuse.flash) drawSprite(sil(f, PAL.white), b.x - half, b.y - half - BOOM_HEIGHT)
 }
 
-/** The colour a boomerang's trail and glow take: its owner's, orange once armed, red-hot off a vent. */
+/**
+ * The colour a boomerang's trail and glow take: its owner's, orange once armed, red-hot off a vent,
+ * or its power-up's when it carries one (fire red, ice blue, bomb orange, big bone, triple white).
+ */
 function boomHue(b: Boomerang): string {
   if (b.armed) return BOMB_COLOR
   if (b.fire > 0) return (tick & 2) === 0 ? PAL.flameR : PAL.flameY
-  return PLAYER_COLORS[players[b.owner].color]
+  for (const k of POWER_KINDS) if (b.powers.has(k)) return POWERS[k].color
+  return PLAYER_COLORS[playerById(b.owner)!.color]
 }
 
 /** Expanding ring, white edge over orange, fading as it grows to its radius: the blast, or a beep's pulse. */
@@ -2593,25 +3946,31 @@ function drawAimIndicator(p: Player) {
   const color = PLAYER_COLORS[p.color]
   const ox = p.x
   const oy = p.y - 8
-  if (p.id === 0 && p.held) {
-    // the exact path the throw will take, wall bounces included, with the stop point marked
-    const pts = previewThrow(p)
+  if (p.id === localId && p.held) {
+    // the exact path the throw will take, wall bounces included, with the stop point marked; with
+    // Triple the two phantom paths too, dimmer
     const lift = BOOM_HEIGHT // ground path drawn at the height the boomerang sprite flies
     const phase = (tick >> 1) % 4
-    let next = 10 + phase // path distance of the next dot
-    let dist = 0
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]
-      const b = pts[i]
-      const seg = len(b.x - a.x, b.y - a.y)
-      if (seg > BOOM_SPEED * 2) continue // a portal hop: no tick moves it this far, so draw nothing between the mouths
-      while (seg > 0 && next <= dist + seg) {
-        const f = (next - dist) / seg
-        ctx.fillStyle = rgba(color, 0.75 - (next / THROW_RANGE) * 0.4)
-        ctx.fillRect(Math.round(a.x + (b.x - a.x) * f), Math.round(a.y + (b.y - a.y) * f - lift), 1, 1)
-        next += 4
+    const rots = hasPower(p, 'triple') ? [-TRIPLE_SPREAD, TRIPLE_SPREAD, 0] : [0]
+    let pts: { x: number; y: number }[] = []
+    for (const rot of rots) {
+      pts = previewThrow(p, rot)
+      const dim = rot === 0 ? 1 : 0.45
+      let next = 10 + phase // path distance of the next dot
+      let dist = 0
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1]
+        const b = pts[i]
+        const seg = len(b.x - a.x, b.y - a.y)
+        if (seg > BOOM_SPEED * 2) continue // a portal hop: no tick moves it this far, so draw nothing between the mouths
+        while (seg > 0 && next <= dist + seg) {
+          const f = (next - dist) / seg
+          ctx.fillStyle = rgba(color, (0.75 - (next / THROW_RANGE) * 0.4) * dim)
+          ctx.fillRect(Math.round(a.x + (b.x - a.x) * f), Math.round(a.y + (b.y - a.y) * f - lift), 1, 1)
+          next += 4
+        }
+        dist += seg
       }
-      dist += seg
     }
     // landing marker where it will stop and hang
     const end = pts[pts.length - 1]
@@ -2639,78 +3998,159 @@ function drawAimIndicator(p: Player) {
   }
 }
 
+/** Width of a player's HUD slot: colour box, one pip per point to the target (five in practice), three power-up badges. */
+function hudSlotWidth(pips: number): number {
+  return 38 + pips * 4 // 58 for five pips
+}
+
 function drawHud() {
   ctx.fillStyle = PAL.hud
   ctx.fillRect(0, 0, W, HUD_H)
   ctx.fillStyle = PAL.hudLine
   ctx.fillRect(0, HUD_H - 1, W, 1)
 
-  for (const p of players) {
-    const x = 5 + p.id * 34
+  if (match.on) {
+    // Two compact lines per player keep lives and round wins separate, even with six players.
+    const slot = Math.min(66, Math.floor((W - 126) / players.length))
+    players.forEach((p, i) => {
+      const x = 5 + i * slot
+      const col = PLAYER_COLORS[p.color]
+      ctx.fillStyle = p.lives > 0 && !p.gone ? col : PAL.hudDim
+      ctx.fillRect(x, 3, 6, 7)
+      if (p.id === localId) { ctx.fillStyle = PAL.white; ctx.fillRect(x + 2, 12, 2, 1) }
+      drawText(ctx, `${p.lives}L`, x + 9, 1, p.lives > 0 ? col : PAL.hudDim)
+      drawText(ctx, match.gameMode === 'teams' ? `P${p.id + 1}` : `${p.score}W`, x + 9, 7, PAL.bone)
+      p.powers.forEach((kind, k) => drawSprite(powerIcons[kind], x + 22 + k * 8, 3))
+    })
+    const gold = players.find(p => p.team === 0)?.score ?? 0
+    const teal = players.find(p => p.team === 1)?.score ?? 0
+    drawText(ctx, match.gameMode === 'teams' ? `GOLD ${gold} TEAL ${teal}` : `ROUND ${match.round}  TO ${match.target}`, W - 121, 1, PAL.bone)
+    drawText(ctx, match.gameMode === 'teams' ? `2V2 R${match.round} TO${match.target} L:LIVES` : 'L:LIVES W:WINS', W - 121, 7, PAL.hudDim)
+    const elapsed = Math.floor(match.roundTick / 60)
+    const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`
+    drawText(ctx, clock, W - textWidth(clock) - 5, 4, PAL.bone)
+    let status = ''
+    if (net?.desyncTick !== undefined && net.desyncTick >= 0) status = 'DESYNC'
+    else if (net?.hostGone) status = 'THE HOST LEFT'
+    else if (net && stallT > 12) status = 'WAITING FOR PLAYERS'
+    if (status) drawText(ctx, status, 5, HUD_H + 4, PAL.red)
+    return
+  }
+  const pips = 5
+  const slotW = hudSlotWidth(pips)
+  players.forEach((p, i) => {
+    const x = 5 + i * slotW
     const col = PLAYER_COLORS[p.color]
     ctx.fillStyle = PAL.outline
     ctx.fillRect(x - 1, 3, 8, 8)
     ctx.fillStyle = p.state === 'dead' ? PAL.hudDim : col
     ctx.fillRect(x, 4, 6, 6)
-    if (p.id === 0) {
+    if (p.gone) {
+      // left: a line through the box
+      ctx.fillStyle = PAL.outline
+      ctx.fillRect(x, 6, 6, 2)
+    }
+    if (p.id === localId) {
       ctx.fillStyle = PAL.white
       ctx.fillRect(x + 2, 12, 2, 1)
     }
-    for (let k = 0; k < 5; k++) {
+    for (let k = 0; k < pips; k++) {
       ctx.fillStyle = k < p.score ? col : PAL.hudLine
       ctx.fillRect(x + 10 + k * 4, 6, 3, 3)
     }
-  }
+    // the held power-ups, oldest first, in the three slots after the pips
+    for (let k = 0; k < POWERUP_CAP; k++) {
+      const sx = x + 12 + pips * 4 + k * 8
+      const kind = p.powers[k]
+      if (kind) drawSprite(powerIcons[kind], sx, 3)
+      else {
+        ctx.fillStyle = PAL.hudLine
+        ctx.fillRect(sx + 3, 7, 3, 1)
+      }
+    }
+  })
 
-  const remaining = Math.max(0, ROUND_SECONDS - Math.floor(tick / 60) % ROUND_SECONDS)
+  // the clock: a rolling minute in practice, the round's in a match (held through the intro and the results)
+  const played = match.on ? (match.phase === 'intro' ? 0 : match.roundTick) : tick % (ROUND_SECONDS * 60)
+  const remaining = Math.max(0, ROUND_SECONDS - Math.floor(played / 60))
   const timer = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`
   const timerX = W / 2 - textWidth(timer) / 2
-  drawText(ctx, timer, timerX, 4, remaining <= 10 ? PAL.red : PAL.bone)
+  drawText(ctx, timer, timerX, 4, remaining <= 10 && match.phase !== 'over' ? PAL.red : PAL.bone)
 
-  // movement feel readout for the local player, when there is room before the timer
-  const p0 = players[0]
-  const sp = len(p0.vx + p0.slideX, p0.vy + p0.slideY) // what the feet actually do: walk plus slide
-  const parts = [p0.state.toUpperCase(), `${sp.toFixed(2)} PX/T`]
-  if (p0.anim !== 'none') parts.push(p0.anim.toUpperCase())
-  if (p0.windup > 0 && sp === 0) parts.push(`WINDUP ${p0.windup}/${START_WINDUP}`)
-  if (p0.slideX !== 0 || p0.slideY !== 0) parts.push(`SLIDE ${len(p0.slideX, p0.slideY).toFixed(2)}`)
-  if (p0.state !== 'dead' && onIce(p0.x, p0.y)) parts.push('ICE')
-  const hanging = booms.find((b) => b.owner === 0 && b.state === 'hang')
-  if (hanging && hanging.hangT > BOOM_HANG) parts.push(`HOVER ${hanging.hangT}/${BOOM_HOVER_MAX}`)
-  else if (p0.dashCd > 0) parts.push(`DASH CD ${p0.dashCd}`)
-  const feel = parts.join('  ')
-  const feelX = 5 + players.length * 34 + 4
-  if (feelX + textWidth(feel) < timerX - 8) drawText(ctx, feel, feelX, 4, PAL.hudDim)
+  const p0 = local()
+  const infoX = 5 + players.length * slotW + 4
+  if (!match.on) {
+    // movement feel readout for the local player, when there is room before the timer
+    const sp = len(p0.vx + p0.slideX, p0.vy + p0.slideY) // what the feet actually do: walk plus slide
+    const parts = [p0.state.toUpperCase(), `${sp.toFixed(2)} PX/T`]
+    if (p0.anim !== 'none') parts.push(p0.anim.toUpperCase())
+    if (p0.windup > 0 && sp === 0) parts.push(`WINDUP ${p0.windup}/${START_WINDUP}`)
+    if (p0.slideX !== 0 || p0.slideY !== 0) parts.push(`SLIDE ${len(p0.slideX, p0.slideY).toFixed(2)}`)
+    if (p0.state !== 'dead' && onIce(p0.x, p0.y)) parts.push('ICE')
+    const hanging = booms.find((b) => b.owner === localId && b.state === 'hang')
+    if (hanging?.hovering) parts.push(`HOVER ${hanging.hangT}/${BOOM_HOVER_MAX}`)
+    else if (p0.dashCd > 0) parts.push(`DASH CD ${p0.dashCd}`)
+    const feel = parts.join('  ')
+    if (infoX + textWidth(feel) < timerX - 8) drawText(ctx, feel, infoX, 4, PAL.hudDim)
+  } else if (net) {
+    // the connection, when it has something to say
+    let status = ''
+    let color: string = PAL.hudDim
+    if (net.desyncTick >= 0) {
+      status = 'DESYNC'
+      color = PAL.red
+    } else if (net.hostGone) {
+      status = 'THE HOST LEFT'
+      color = PAL.red
+    } else if (stallT > 12) {
+      const who = net.waitingOn(netTick + 1)
+      status = who.length ? `WAITING FOR ${who.join(', ')}` : 'WAITING'
+    }
+    if (status && infoX + textWidth(status) < timerX - 8) drawText(ctx, status, infoX, 4, color)
+  }
 
-  // the room you are in between < > arrows that cycle the roster (click, or Tab), then the title
+  // the room you are in, between < > arrows that cycle the roster in practice (click, or Tab), then the title
   const title = 'BOOMERANGEON'
   const titleX = W - textWidth(title) - 5
   drawText(ctx, title, titleX, 4, PAL.hudDim)
   const entry = arenaEntry()
   const zone = zoneName(p0.x) || arenaName.toUpperCase()
-  const label = entry ? `${zone} ${arenaIndex + 1}/${ARENA_LIST.length}` : zone
+  const label = match.on ? `${zone}   ROUND ${match.round}   FIRST TO ${match.target}` : entry ? `${zone} ${arenaIndex + 1}/${ARENA_LIST.length}` : zone
   const lw = textWidth(label)
   const labelX = titleX - lw - 18
   hudArenaBox = { x0: labelX - 8, x1: labelX + lw + 8 }
-  const over = scriptedTicks < 0 && mouseY < HUD_H && mouseX >= hudArenaBox.x0 && mouseX <= hudArenaBox.x1
-  const overBack = over && mouseX < labelX + lw / 2
-  drawText(ctx, '<', labelX - 6, 4, overBack ? PAL.white : PAL.hudDim)
+  if (!match.on) {
+    const over = scriptedTicks < 0 && !overlay && mouseY < HUD_H && mouseX >= hudArenaBox.x0 && mouseX <= hudArenaBox.x1
+    const overBack = over && mouseX < labelX + lw / 2
+    drawText(ctx, '<', labelX - 6, 4, overBack ? PAL.white : PAL.hudDim)
+    drawText(ctx, '>', labelX + lw + 3, 4, over && !overBack ? PAL.white : PAL.hudDim)
+  }
   drawText(ctx, label, labelX, 4, PAL.bone)
-  drawText(ctx, '>', labelX + lw + 3, 4, over && !overBack ? PAL.white : PAL.hudDim)
-  if (!lightingOn) drawText(ctx, 'LIGHTS OFF', hudArenaBox.x0 - 44, 4, PAL.hudDim)
+  if (!options.lighting) drawText(ctx, 'LIGHTS OFF', hudArenaBox.x0 - 44, 4, PAL.hudDim)
 }
 
 // The room card: title, what the room is for, how to move on. Shown for the first 2.5 s of a room
-// (the tick count restarts when one loads) and never in scripted stills.
+// (the tick count restarts when one loads) and never in scripted stills. A match shows it through
+// the intro instead, with the round and READY in place of the practice keys.
 const BANNER_TICKS = 150
 function drawBanner() {
-  if (scriptedTicks >= 0 || tick >= BANNER_TICKS) return
-  const fade = Math.min(1, (BANNER_TICKS - tick) / 30)
+  if (scriptedTicks >= 0) return
+  let fade: number
+  let hint: string
+  if (match.on) {
+    if (match.phase !== 'intro') return
+    fade = Math.min(1, (MATCH_INTRO - match.phaseT) / 15)
+    hint = `${match.gameMode === 'teams' ? '2V2   ' : ''}ROUND ${match.round}   ${match.lives} LIVES EACH   FIRST TO ${match.target}`
+  } else {
+    if (tick >= BANNER_TICKS) return
+    fade = Math.min(1, (BANNER_TICKS - tick) / 30)
+    hint = `${arenaEntry() ? `ROOM ${arenaIndex + 1}/${ARENA_LIST.length}   ` : ''}TAB: NEXT ROOM   SHIFT-TAB: BACK   B: ADD A BOT   SHIFT-B: REMOVE ONE   ESC: MENU`
+  }
   const entry = arenaEntry()
   const title = (entry?.title ?? arenaName).toUpperCase()
   const blurb = entry ? entry.blurb.toUpperCase() : ''
-  const hint = `${entry ? `ROOM ${arenaIndex + 1}/${ARENA_LIST.length}   ` : ''}TAB: NEXT ROOM   SHIFT-TAB: BACK   OR CLICK < > IN THE HUD`
-  const bandH = blurb ? 44 : 34
+  const ready = match.on && match.phaseT >= MATCH_INTRO - 60
+  const bandH = (blurb ? 44 : 34) + (ready ? 16 : 0)
   const y0 = HUD_H + Math.round(WORLD_H / 2 - bandH / 2)
   ctx.globalAlpha = 0.8 * fade
   ctx.fillStyle = PAL.outline
@@ -2727,6 +4167,96 @@ function drawBanner() {
     y += 10
   }
   drawText(ctx, hint, W / 2 - textWidth(hint) / 2, y, PAL.hudDim)
+  if (ready) {
+    y += 10
+    const pulse = (match.phaseT >> 3) & 1 ? PAL.white : PAL.cream
+    drawText(ctx, 'READY', W / 2 - textWidth('READY', 2) / 2, y, pulse, 2)
+  }
+  ctx.globalAlpha = 1
+}
+
+/** The big word over the world: GO, who took the round, DRAW. */
+function drawCallout() {
+  if (!callout) return
+  const a = Math.min(1, callout.ttl / 12)
+  const scale = textWidth(callout.text, 2) > W - 20 ? 1 : 2
+  const y = HUD_H + Math.round(WORLD_H / 2) - 24
+  ctx.globalAlpha = a
+  drawText(ctx, callout.text, Math.round(W / 2 - textWidth(callout.text, scale) / 2) + scale, y + scale, PAL.outline, scale)
+  drawText(ctx, callout.text, Math.round(W / 2 - textWidth(callout.text, scale) / 2), y, callout.color, scale)
+  ctx.globalAlpha = 1
+}
+
+/** Small fading lines under the HUD: who left. */
+function drawNotices() {
+  const p = local()
+  if (match.on && match.phase === 'play' && p.state === 'dead') {
+    const label = p.lives > 0 ? `RESPAWNING IN ${(Math.max(0, p.respawnT) / 60).toFixed(1)}` : 'OUT THIS ROUND'
+    const x = Math.round((W - textWidth(label)) / 2)
+    ctx.fillStyle = PAL.hud
+    ctx.fillRect(x - 5, H - 20, textWidth(label) + 10, 13)
+    drawText(ctx, label, x, H - 16, PAL.bone)
+  }
+  let y = HUD_H + 4
+  for (let i = notices.length - 1; i >= 0; i--) {
+    const n = notices[i]
+    if (--n.ttl <= 0) {
+      notices.splice(i, 1)
+      continue
+    }
+    ctx.globalAlpha = Math.min(1, n.ttl / 30)
+    drawText(ctx, n.text, 5, y, PAL.bone)
+    y += 8
+  }
+  ctx.globalAlpha = 1
+}
+
+/** The podium (docs/01 §10): rounds won, then kills; the winner's name on top; how to go on. */
+function drawResults() {
+  if (!match.on || match.phase !== 'over') return
+  const order = standings()
+  const winner = playerById(match.lastWinner) ?? order[0]
+  const rowH = 10
+  const w = 190
+  const h = 34 + order.length * rowH + 16
+  const x = Math.round(W / 2 - w / 2)
+  const y = Math.round(HUD_H + WORLD_H / 2 - h / 2)
+  ctx.fillStyle = rgba(PAL.outline, 0.45)
+  ctx.fillRect(0, HUD_H, W, WORLD_H)
+  drawPanel(ctx, x, y, w, h, 0.94)
+  const headline = `${sideName(winner)} WINS`
+  drawText(ctx, headline, Math.round(W / 2 - textWidth(headline, 2) / 2), y + 7, PLAYER_COLORS[winner.color], 2)
+  drawText(ctx, 'ROUNDS', x + w - 70, y + 24, PAL.hudDim)
+  drawText(ctx, 'KILLS', x + w - 30, y + 24, PAL.hudDim)
+  let ry = y + 34
+  order.forEach((p, i) => {
+    const col = p.gone ? PAL.hudDim : PLAYER_COLORS[p.color]
+    ctx.fillStyle = PAL.outline
+    ctx.fillRect(x + 8, ry - 1, 7, 7)
+    ctx.fillStyle = col
+    ctx.fillRect(x + 9, ry, 5, 5)
+    drawText(ctx, `${i + 1}.`, x + 18, ry, PAL.hudDim)
+    drawText(ctx, displayName(p) + (p.gone ? ' (LEFT)' : ''), x + 30, ry, p.gone ? PAL.hudDim : PAL.bone)
+    drawText(ctx, String(p.score), x + w - 60, ry, PAL.cream)
+    drawText(ctx, String(p.kills), x + w - 22, ry, PAL.cream)
+    ry += rowH
+  })
+  const canCall = match.phaseT >= RESULTS_HOLD
+  let foot: string
+  if (net && net.role !== 'host') foot = net.hostGone ? 'THE HOST LEFT   ESC: LEAVE' : 'WAITING FOR THE HOST   ESC: LEAVE'
+  else if (!canCall) foot = ''
+  else foot = net ? 'ENTER: REMATCH   ESC: LEAVE' : 'ENTER: REMATCH   ESC: MENU'
+  if (foot) drawText(ctx, foot, Math.round(W / 2 - textWidth(foot) / 2), y + h - 10, canCall ? PAL.cream : PAL.hudDim)
+}
+
+/** A player's name over their head in a match, so you know who you are throwing at. */
+function drawName(p: Player) {
+  const name = displayName(p)
+  const nx = Math.round(p.x - textWidth(name) / 2)
+  const ny = Math.round(p.y - 27)
+  ctx.globalAlpha = p.id === localId ? 0.5 : 0.85
+  drawText(ctx, name, nx + 1, ny + 1, PAL.outline)
+  drawText(ctx, name, nx, ny, p.id === localId ? PAL.bone : PLAYER_COLORS[p.color])
   ctx.globalAlpha = 1
 }
 
@@ -2746,10 +4276,13 @@ function drawCursor() {
 
 // Art review: every frame of each action, one row per facing, right-facing/right-armed originals only.
 function renderSheet() {
+  const chars = sheet === 'all' ? CHARACTERS.map((_, i) => i) : [localChar]
+  const sheetW = chars.length * 198 + 8, sheetH = 356
+  if (screen.canvas.width !== sheetW || screen.canvas.height !== sheetH) screen.resize(sheetW, sheetH)
   ctx.fillStyle = PAL.floor[0]
-  ctx.fillRect(0, 0, W, H)
+  ctx.fillRect(0, 0, sheetW, sheetH)
   const rows: [string, (s: CharSet) => Sprite[]][] = [
-    ['STAND', (s) => [...s.stand.down, ...s.stand.sideR, ...s.stand.up]],
+    ['STAND', (s) => [s.stand.down[0], s.stand.sideR[0], s.stand.up[0]]],
     ['RUN D', (s) => s.run.down],
     ['RUN S', (s) => s.run.sideR],
     ['RUN U', (s) => s.run.up],
@@ -2764,14 +4297,13 @@ function renderSheet() {
     ['MELEE U', (s) => s.melee.up],
     ['ROLL', (s) => s.roll],
   ]
-  const chars = sheet === 'all' ? CHARACTERS.map((_, i) => i) : [localChar]
   chars.forEach((c, ci) => {
-    const x0 = 6 + ci * 156
+    const x0 = 6 + ci * 198
     drawText(ctx, CHARACTERS[c].name, x0, 4, PAL.bone)
     rows.forEach(([label, frames], ri) => {
-      const y = 14 + ri * 24 // 14 rows fit the 350 px canvas at 24
+      const y = 14 + ri * 24
       drawText(ctx, label, x0, y + 7, PAL.hudDim)
-      frames(charSets[c][ci]).forEach((s, i) => {
+      frames(charSets[c][ci % PLAYER_COLORS.length]).forEach((s, i) => {
         // a ground line under each frame makes a floating pose or an empty bottom row obvious
         ctx.fillStyle = PAL.floorMortar
         ctx.fillRect(x0 + 34 + i * 18, y + s.h, s.w, 1)
@@ -2796,12 +4328,14 @@ function render() {
   const vis = (x: number, m = 40) => x > x0 - m && x < x1 + m
   const c0 = Math.max(0, Math.floor(x0 / TILE))
   const c1 = Math.min(arena.cols - 1, Math.floor((x1 - 1) / TILE))
+  // screen shake moves the whole world layer by whole pixels; the HUD, banner and cursor stay put
+  const [shx, shy] = options.shake ? vfx.shakeOffset(tick) : [0, 0]
 
   ctx.fillStyle = PAL.bg
   ctx.fillRect(0, 0, W, H)
   ctx.save()
-  ctx.translate(-cx, HUD_H)
-  ctx.drawImage(staticLayer, x0, 0, W, WORLD_H, x0, 0, W, WORLD_H)
+  ctx.translate(-cx + shx, HUD_H + shy)
+  ctx.drawImage(staticLayer, x0 - 8, 0, W + 16, WORLD_H, x0 - 8, 0, W + 16, WORLD_H)
 
   const lights: Light[] = [] // world coords; shifted to the screen when composed
   const drawables: Drawable[] = []
@@ -2885,25 +4419,57 @@ function render() {
     if (!bl.alive || !bl.lit) continue
     art.drawFuseGlow(ctx, bl.c * TILE + 8, bl.r * TILE + 13, bl.fuse)
   }
-  for (const s of smears) {
-    if (!vis(s.x)) continue
-    const t = s.ttl / s.max
-    ctx.fillStyle = rgba(s.color, 0.2 + 0.5 * t)
-    ctx.fillRect(Math.round(s.x) - (s.w >> 1), Math.round(s.y), s.w, 1)
+  // laid ice, under the floor marks so the skid scratches sit on top of it; it thins over its last quarter
+  for (const i of iceList) {
+    const c = i % arena.cols
+    const r = Math.floor(i / arena.cols)
+    if (!vis(c * TILE)) continue
+    part.drawFloorIce(ctx, c * TILE, r * TILE, 1 - (tick - iceAt[i]) / ICE_TTL, tick, i)
+  }
+  // floor marks (smears, prints, scratches, scorches, splats, settled snow) and debris lying still
+  vfx.drawGround(ctx, vis)
+  // burning floor, with a glow per tile that dies with it
+  for (const i of fireList) {
+    const c = i % arena.cols
+    const r = Math.floor(i / arena.cols)
+    if (!vis(c * TILE)) continue
+    const life = 1 - (tick - fireAt[i]) / FIRE_TTL
+    part.drawFloorFire(ctx, c * TILE, r * TILE, life, tick, i)
+    lights.push({ x: c * TILE + 8, y: r * TILE + 6, r: 30, a: 0.7 * Math.min(1, life * 2), glow: rgba(PAL.flameO, 0.3 * life), glowR: 20 })
+  }
+  // pickups: the point glows and sparks while one is on its way, then the badge floats over it
+  for (const pk of pickups) {
+    if (!vis(pk.x)) continue
+    const info = POWERS[pk.kind]
+    if (!pk.ready) {
+      part.drawSpawnWarn(ctx, pk.x, pk.y, pk.t / POWERUP_WARN, tick, info.color)
+      continue
+    }
+    part.drawPickupBase(ctx, pk.x, pk.y, tick, info.color)
+    const bob = Math.round(Math.sin(tick / 12) * 1.5)
+    const fade = pk.t > POWERUP_TTL - 90 && (tick & 4) === 0 ? 0.4 : 1 // blinks for its last 1.5 s
+    drawables.push({ y: pk.y + 4, draw: () => drawSprite(powerIcons[pk.kind], pk.x - 4, pk.y - 12 - bob, fade) })
+    lights.push({ x: pk.x, y: pk.y - 6, r: 26, a: 0.6, glow: rgba(info.color, 0.25), glowR: 14 })
   }
   for (const b of booms) if (b.state === 'dropped' && vis(b.x)) drawBoomerang(b)
   for (const p of players) {
     if (p.state === 'dead' || !vis(p.x)) continue
-    if (inGrass(p.x, p.y) && p.id !== 0) continue
+    if (inGrass(p.x, p.y) && p.id !== localId) continue
     drawSprite(shadowDude, p.x - 5, p.y - 2)
   }
-  for (const b of booms) if (b.state !== 'dropped' && vis(b.x)) drawSprite(shadowBoom, b.x - 3, b.y - 1)
+  for (const b of booms) {
+    if (b.state === 'dropped' || !vis(b.x)) continue
+    if (b.powers.has('big')) drawSpriteScaled(shadowBoom, b.x, b.y, BIG_SCALE, 0.8)
+    else drawSprite(shadowBoom, b.x - 3, b.y - 1, b.phantom ? 0.6 : 1)
+  }
   for (const s of sinks) {
     if (!vis(s.x)) continue
     const t = s.ttl / s.max
     const h = Math.max(1, Math.round(s.s.h * t))
+    // a hit body flashes solid white for its first frames (docs/01 §8); a fall just drops away
+    const img = s.flash && s.max - s.ttl < HIT_FLASH ? sil(s.s, PAL.white).img : s.s.img
     ctx.globalAlpha = 0.35 + t * 0.65
-    ctx.drawImage(s.s.img, 0, 0, s.s.w, h, s.x, s.y + (s.s.h - h), s.s.w, h)
+    ctx.drawImage(img, 0, 0, s.s.w, h, s.x, s.y + (s.s.h - h), s.s.w, h)
     ctx.globalAlpha = 1
   }
   for (const a of afterimages) {
@@ -2966,8 +4532,13 @@ function render() {
   for (const p of players) {
     if (p.state === 'dead' || !vis(p.x)) continue
     drawables.push({ y: p.y, draw: () => drawPlayer(p) })
-    const strength = p.id === 0 ? 0.5 : 0.35
-    lights.push({ x: p.x, y: p.y - 8, r: 44, a: strength })
+    if (match.on && !inGrass(p.x, p.y)) overhead.push(() => drawName(p))
+    const strength = p.id === localId ? 0.5 : 0.35
+    // dropping in, the body carries a glow in its colour that fades as it lands
+    if (p.spawnT > 0) {
+      const k = p.spawnT / SPAWN_DROP
+      lights.push({ x: p.x, y: p.y - 8, r: 44 + 30 * k, a: 1, glow: rgba(PLAYER_COLORS[p.color], 0.35 * k + 0.1), glowR: 24 + 12 * k })
+    } else lights.push({ x: p.x, y: p.y - 8, r: 44, a: strength })
   }
   for (const b of booms) {
     if (b.state === 'dropped' || !vis(b.x)) continue
@@ -2993,8 +4564,10 @@ function render() {
     drawables.push({
       y: h.y + h.sh,
       draw: () => {
+        // the hit-flash (docs/01 §8): both halves solid white for the first frames, then the body
+        const img = h.max - h.ttl < HIT_FLASH ? sil(h.s, PAL.white).img : h.s.img
         ctx.globalAlpha = Math.min(1, (h.ttl / h.max) * 1.6)
-        ctx.drawImage(h.s.img, h.sx, h.sy, h.sw, h.sh, Math.round(h.x), Math.round(h.y), h.sw, h.sh)
+        ctx.drawImage(img, h.sx, h.sy, h.sw, h.sh, Math.round(h.x), Math.round(h.y), h.sw, h.sh)
         ctx.globalAlpha = 1
       },
     })
@@ -3002,32 +4575,14 @@ function render() {
   drawables.sort((a, b) => a.y - b.y)
   for (const d of drawables) d.draw()
 
-  for (const pt of particles) {
-    if (!vis(pt.x)) continue
-    const t = pt.ttl / pt.max
-    ctx.fillStyle = rgba(pt.color, Math.min(1, t * 1.5))
-    const sz = pt.ttl > 10 ? 2 : 1
-    ctx.fillRect(Math.round(pt.x), Math.round(pt.y), sz, sz)
-  }
+  // everything in the air: particles, the weather, rings; then the slashes and blasts over them
+  vfx.drawAir(ctx, vis, tick)
   for (const s of slashes) drawSlash(s)
   for (const bl of blasts) if (vis(bl.x, bl.r + 40)) drawBlast(bl)
   for (const o of overhead) o()
-  if (look.snowfall) {
-    // weather, render-only: a sparse fall of single-pixel flakes drifting down and a little to the right
-    const n = Math.round((arena.cols * arena.rows) / 12)
-    ctx.fillStyle = 'rgba(240,248,255,0.8)'
-    for (let k = 0; k < n; k++) {
-      const speed = 0.25 + hash2(k, 1, 7) * 0.35
-      const sway = hash2(k, 2, 7) * 6.28
-      const fy = (hash2(k, 0, 7) * WORLD_H + tick * speed) % WORLD_H
-      const fx = (hash2(k, 3, 7) * WORLD_W + Math.sin(tick / 40 + sway) * 6 + tick * 0.15 + WORLD_W) % WORLD_W
-      if (!vis(fx)) continue
-      ctx.fillRect(Math.round(fx), Math.round(fy), 1, 1)
-    }
-  }
   ctx.restore()
 
-  if (lightingOn) {
+  if (options.lighting) {
     // the lightmap is screen-sized: shift the lights by the camera and drop the ones out of view
     const onScreen: Light[] = []
     for (const l of lights) {
@@ -3037,75 +4592,229 @@ function render() {
     }
     lightmap.render(onScreen, ambientAt(cx + W / 2), 0.5)
     ctx.save()
-    ctx.translate(0, HUD_H)
+    ctx.translate(shx, HUD_H + shy)
     lightmap.compose(ctx, onScreen)
     ctx.restore()
   }
 
+  // a blast's white flash, over the lit world (off with the shake: the same people mind both)
+  const flashA = options.shake ? vfx.flashAlpha() : 0
+  if (flashA > 0) {
+    ctx.fillStyle = rgba(PAL.white, flashA)
+    ctx.fillRect(0, HUD_H, W, WORLD_H)
+  }
+
   ctx.save()
-  ctx.translate(-cx, HUD_H)
+  ctx.translate(-cx + shx, HUD_H + shy)
   for (const p of players) {
     if (p.state === 'dead' || !vis(p.x, 240)) continue
-    if (p.id !== 0 && inGrass(p.x, p.y)) continue
+    if (p.id !== localId && inGrass(p.x, p.y)) continue
     drawAimIndicator(p)
   }
   ctx.restore()
 
+  // a fresh room comes up from black (live play only; a still wants the whole picture)
+  if (scriptedTicks < 0 && tick < FADE_IN) {
+    ctx.fillStyle = rgba(PAL.outline, 1 - tick / FADE_IN)
+    ctx.fillRect(0, HUD_H, W, WORLD_H)
+  }
+
+  const view = deathView()
+  if (view.zoom > 1) {
+    if (!deathFrame) deathFrame = document.createElement('canvas')
+    if (deathFrame.width !== W || deathFrame.height !== WORLD_H) { deathFrame.width = W; deathFrame.height = WORLD_H }
+    ctx2d(deathFrame).drawImage(screen.canvas, 0, HUD_H, W, WORLD_H, 0, 0, W, WORLD_H)
+    ctx.drawImage(deathFrame, view.sx, view.sy, W / view.zoom, WORLD_H / view.zoom, 0, HUD_H, W, WORLD_H)
+  }
   drawBanner()
+  drawCallout()
+  drawResults()
   drawHud()
+  drawNotices()
+  drawOverlay()
   drawCursor()
   screen.present()
 }
 
 // ---------------------------------------------------------------- loop
 function frameInputs(scripted: boolean): Input[] {
-  return players.map((p) => (p.ai ? aiInput(p) : scripted ? scriptedInput(tick, p) : readLocalInput()))
+  const inputs: Input[] = []
+  for (const p of players) inputs[p.id] = p.ai ? aiInput(p) : scripted ? scriptedInput(tick, p) : readLocalInput()
+  return inputs
 }
 
-if (scriptedTicks >= 0) {
-  try {
-    // ?swap=K: press Tab K times (Shift+Tab for negative K) before the scene runs, to still a swap
-    const swap = Number(params.get('swap') ?? 0) || 0
-    for (let i = 0; i < Math.abs(swap); i++) switchArena(swap > 0 ? 1 : -1)
-    for (let i = 0; i < scriptedTicks; i++) {
-      step(frameInputs(true))
-      if (trace) {
-        const p0 = players[0]
-        const bs = booms
-          .map((b) => `P${b.owner} ${b.state}${b.state === 'hang' ? b.hangT : ''}${b.recall && b.state === 'return' ? '(recall)' : ''}${b.armed ? '*' : ''} ${b.x.toFixed(1)},${b.y.toFixed(1)} v=${len(b.vx, b.vy).toFixed(2)}`)
-          .join(' | ')
-        const slide = len(p0.slideX, p0.slideY)
-        const flags = `${slide ? ` slide${slide.toFixed(2)}` : ''}${p0.windup ? ` windup${p0.windup}` : ''}${p0.anim !== 'none' ? ` ${p0.anim}${p0.animT}` : ''}`
-        console.log(`T${tick} P0 ${p0.state}${flags} ${p0.x.toFixed(1)},${p0.y.toFixed(1)} v=${len(p0.vx + p0.slideX, p0.vy + p0.slideY).toFixed(2)} walk=${len(p0.vx, p0.vy).toFixed(2)} ${bs}`)
-      }
-    }
-    updateCamera(true)
-    render()
-    // one line the screenshot script can grep: where the local player ended up and what happened
-    const p0 = players[0]
-    console.log(`END t${tick} P0 ${p0.state} ${p0.x.toFixed(1)},${p0.y.toFixed(1)} tile ${Math.floor(p0.x / TILE)},${Math.floor(p0.y / TILE)} cam ${Math.round(camX)} | ${eventLog.join(' · ') || 'no events'}`)
-    document.title = `boomerangeon t=${tick}`
-    document.getElementById('hint')!.textContent = `scripted frame t=${tick} · ${zoneName(players[0].x)} · ${booms.length} boomerangs · ${eventLog.join(' · ') || 'no events yet'}`
-    // headless screenshots only pick up canvas content presented inside an animation frame
-    requestAnimationFrame(() => render())
-  } catch (err) {
-    reportError(err instanceof Error ? `${err.message}\n${err.stack}` : String(err))
+/** Who is in the game and how it is run. The shell (game/app.ts) builds one from the menu or the lobby. */
+export interface GameConfig {
+  /** practice: the demo as it stands, bots from the URL, rooms cycle on Tab. match: rounds, a target, a podium (docs/01 §10). */
+  mode: 'practice' | 'match'
+  /** the slot this browser plays */
+  localSlot: number
+  /** a match's roster, bots included; practice ignores it and reads the URL */
+  players: { slot: number; name: string; char: number; color: number; ai: boolean; team?: Team }[]
+  /** a match's seed, the same on every client; practice keeps ?seed= */
+  seed?: number
+  /** the first room of a match, by roster key */
+  arenaKey?: string
+  rules?: { target: number; rooms: RoomOrder; lives: number; gameMode?: MatchKind }
+  /** an online match's lockstep session; absent, the match is local */
+  net?: NetSession
+}
+
+let started = false
+
+/**
+ * Starts the game in the #game mount. Called once: the module keeps its state at module level, so a
+ * second game means a fresh page (quitToMenu). Scripted runs (?t=) take the practice path and never
+ * touch the audio engine; the shell imports this module only when a game is about to start.
+ */
+export function startGame(cfg: GameConfig) {
+  if (started) throw new Error('startGame called twice')
+  started = true
+  localId = cfg.localSlot
+  if (cfg.seed !== undefined && cfg.seed !== seed) {
+    seed = cfg.seed
+    rng = mulberry32(seed)
+    vfx = new Fx(seed * 7919 + 1)
   }
-} else {
+
+  const mount = document.getElementById('game')!
+  screen = createScreen(W, H, mount)
+  ctx = screen.ctx
+  lightmap = new Lightmap(W, WORLD_H)
+  installListeners()
+  initAudio()
+
+  if (cfg.mode === 'match') {
+    // slot order on every client, so the sim walks the players (and the bots draw on the rng) the same way everywhere
+    const roster = cfg.players.slice().sort((a, b) => a.slot - b.slot)
+    for (const q of roster) players.push(makePlayer(q.slot, q.char, q.color, q.ai, q.name, q.team))
+    if (cfg.net) {
+      net = cfg.net
+      net.primeNeutral()
+      // closing the tab tells the others at once instead of leaving them waiting on our input
+      window.addEventListener('pagehide', () => net?.close())
+    }
+    const first = Math.max(0, ARENA_LIST.findIndex((a) => a.key === (cfg.arenaKey ?? arenaName)))
+    startMatch(cfg.rules?.target ?? 5, cfg.rules?.rooms ?? 'cycle', first, cfg.rules?.lives ?? 3, cfg.rules?.gameMode ?? 'ffa')
+  } else {
+    seatPracticePlayers()
+    for (const k of giveList) givePower(local(), k)
+  }
+  updateCamera(true)
+
+  const hint = document.getElementById('hint')
+  if (hint && scriptedTicks < 0) {
+    hint.innerHTML =
+      '<b>WASD</b> move · <b>mouse</b> aim · <b>LMB</b> throw, hold again to hover once anywhere, release to return · <b>RMB</b>/<b>F</b> melee · <b>Space</b> dash · <b>L</b> lighting · <b>M</b> mute · <b>Esc</b> menu' +
+      (cfg.mode === 'practice' ? ' · <b>1–7</b> character · <b>Tab</b> next arena (<b>Shift+Tab</b> back, or click the <b>&lt; &gt;</b> in the HUD) · <b>B</b> add a bot (<b>Shift+B</b> remove)' : '')
+  }
+
+  if (scriptedTicks >= 0) {
+    try {
+      // ?swap=K: press Tab K times (Shift+Tab for negative K) before the scene runs, to still a swap
+      const swap = Number(params.get('swap') ?? 0) || 0
+      for (let i = 0; i < Math.abs(swap); i++) switchArena(swap > 0 ? 1 : -1)
+      for (let i = 0; i < scriptedTicks; i++) {
+        advance(() => frameInputs(true))
+        if (trace) {
+          const p0 = local()
+          const bs = boomTrace()
+          const slide = len(p0.slideX, p0.slideY)
+          const flags = `${slide ? ` slide${slide.toFixed(2)}` : ''}${p0.windup ? ` windup${p0.windup}` : ''}${p0.anim !== 'none' ? ` ${p0.anim}${p0.animT}` : ''}`
+          console.log(`T${tick} P0 ${p0.state}${flags} ${p0.x.toFixed(1)},${p0.y.toFixed(1)} v=${len(p0.vx + p0.slideX, p0.vy + p0.slideY).toFixed(2)} walk=${len(p0.vx, p0.vy).toFixed(2)} ${bs}`)
+        }
+      }
+      updateCamera(true)
+      render()
+      // one line the screenshot script can grep: where the local player ended up and what happened
+      const p0 = local()
+      console.log(`END t${tick} P0 ${p0.state} ${p0.x.toFixed(1)},${p0.y.toFixed(1)} tile ${Math.floor(p0.x / TILE)},${Math.floor(p0.y / TILE)} cam ${Math.round(camX)} | ${eventLog.join(' · ') || 'no events'}`)
+      document.title = `boomerangeon t=${tick}`
+      document.getElementById('hint')!.textContent = `scripted frame t=${tick} · ${zoneName(p0.x)} · ${booms.length} boomerangs · ${eventLog.join(' · ') || 'no events yet'}`
+      // headless screenshots only pick up canvas content presented inside an animation frame
+      requestAnimationFrame(() => render())
+    } catch (err) {
+      reportError(err instanceof Error ? `${err.message}\n${err.stack}` : String(err))
+    }
+    return
+  }
+
   document.title = pageTitle()
   let last = performance.now()
   let acc = 0
   const DT = 1000 / 60
-  const loop = (now: number) => {
+  const step = () => {
+    // Use one clock for both animation frames and incoming network events. rAF's timestamp can
+    // precede a network event that already stepped this frame.
+    const now = performance.now()
     acc += Math.min(100, now - last)
     last = now
-    while (acc >= DT) {
-      step(frameInputs(false))
-      acc -= DT
+    while (acc >= DT / gameSpeed()) {
+      const tickTime = DT / gameSpeed()
+      if (paused) {
+        acc -= tickTime
+        continue
+      }
+      // Death slow-motion is derived from shared sim state, never local picture options.
+      if (net) {
+        if (!netStep()) {
+          // Keep one due tick ready for its packet, but discard the rest of a network stall.
+          // Otherwise a background packet can arrive just after we spent its time budget and
+          // the whole pipeline has to wait for a throttled timer to wake it again.
+          acc = tickTime
+          break
+        }
+      }
+      else advance(() => frameInputs(false))
+      acc -= tickTime
     }
+  }
+  if (net) {
+    // Browsers stop rAF in hidden tabs. Respond to the visible players' incoming traffic instead;
+    // the same real-time accumulator still caps the pace, even when every tab is hidden. A timer
+    // restarts the pipeline if everyone is hidden or the last packet arrived just before a tick
+    // was due. Timers alone are insufficient: browsers throttle them in background tabs too.
+    const backgroundStep = () => { if (document.hidden) step() }
+    net.onActivity = backgroundStep
+    const timer = window.setInterval(backgroundStep, DT)
+    window.addEventListener('pagehide', () => window.clearInterval(timer), { once: true })
+  }
+  const loop = () => {
+    step()
     updateCamera(false)
     render()
+    audioFrame()
     requestAnimationFrame(loop)
   }
   requestAnimationFrame(loop)
+}
+
+/**
+ * The continuous side of the soundtrack, once per rendered frame (docs/07 §4.4, §6.4): where the
+ * listener is, which things are making a sound right now, and how much of the arrangement plays.
+ */
+function audioFrame() {
+  setListener(camX + W / 2, W)
+  for (let i = 0; i < booms.length; i++) {
+    const b = booms[i]
+    if (b.phantom || b.state === 'dropped') continue
+    const key = `boom${i}`
+    if (b.state === 'hang') {
+      if (b.armed) loop(key, 'fuse', b.x)
+      else if (b.hovering) loop(key, 'hover', b.x)
+    } else loop(key, 'flight', b.x, (b.state === 'return' ? -1 : 1) * Math.min(1, len(b.vx, b.vy) / BOOM_RETURN_SPEED))
+  }
+  for (let i = 0; i < crushers.length; i++) {
+    const cr = crushers[i]
+    if (cr.look === 'saw') loop(`crusher${i}`, 'saw', cr.pos.x, 0, cr.pos.moving ? 1 : 0.5)
+    else if (cr.look === 'boulder') {
+      if (cr.pos.moving) loop(`crusher${i}`, 'boulder', cr.pos.x)
+    } else loop(`crusher${i}`, 'pendulum', cr.pos.x, cr.pos.length > 0 ? cr.pos.dist / cr.pos.length : 0)
+  }
+  for (let i = 0; i < carts.length; i++) if (carts[i].pos.moving) loop(`cart${i}`, 'cart', carts[i].pos.x)
+  for (let i = 0; i < barrels.length; i++) {
+    const bl = barrels[i]
+    if (bl.alive && bl.lit) loop(`barrel${i}`, 'fuse', bl.c * TILE + 8, 0, 0.8)
+  }
+  endFrame()
 }

@@ -10,7 +10,8 @@ decisions are in §11.
 
 Scope: everything about the room the fight happens in — the tile grid, static tiles, props,
 periodic and moving hazards, the hurry-up escalation, the arena data format and validator, and the
-first set of arenas. Power-ups (03) only appear here as spawn points and as the "fire flag" hook.
+first set of arenas. Power-ups (03) only appear here as spawn points and as the "fire flag" hook;
+03 §6 has the full matrix of power-ups against these elements.
 
 ---
 
@@ -137,8 +138,9 @@ doesn't hide yet. Decision in §11: regrow or not.
 
 ### 4.3 Crate `C` — core, in 01 already
 Solid to everything. Breaks on: boomerang hit (the boomerang **continues at full speed**, so a crate
-is one-shot cover), melee swing, blast, cart. Debris is cosmetic. May hold a power-up (03). Does
-not respawn within a round.
+is one-shot cover), melee swing, blast, cart. Debris is cosmetic. May hold a power-up: 03 §3 drops
+one from a quarter of broken crates (`CRATE_DROP_CHANCE`, 03 §11 #3). Does not respawn within a
+round.
 
 ### 4.4 Barrel `B` — core (the demo already draws it)
 Solid; boomerangs **bounce** off it like a wall. Any hit (boomerang, melee, blast, fire vent flame,
@@ -162,8 +164,9 @@ The warn phase is the escape window; standing still on spikes is never safe for 
 ### 4.7 Fire vent `*` — core
 `VENT_IDLE` 150 → `VENT_WARN` 30 (embers, hiss) → `VENT_FLAME` 40 (lethal, no dash protection) →
 idle. The flame is a column one tile wide and ~1.5 tiles tall, so it reads from across the room.
-Lights barrels in the tile; a boomerang flying through a flame gets the **fire flag** (03 hook, no
-effect until 03). Phases per rect like spikes.
+Lights barrels in the tile; a boomerang flying through a flame gets the **fire flag** for the rest
+of that flight, so on the way out it lays the 03 §5.1 fire line from there (built 2026-10-09 with
+03). Phases per rect like spikes.
 
 ### 4.8 Portal — core (Aaron, 2026-10-09: "portals that take you to the other side of the map", "styled like portal 2 - blue and orange and on the walls")
 Two **mouths set into wall tiles**, one blue (`a`) and one orange (`b`), linked both ways; in the
@@ -385,6 +388,10 @@ Rough asset counts so the shortlist can be weighed against "Aaron is not an arti
 | Palettes | 3 floor/wall recolours | — |
 
 Everything stays on the `PROP_KEY` palette; three floor recolours give eight distinct rooms.
+
+2026-10-09: superseded by 04 §8, the asset list as built (the rooms got nine full looks rather than
+three recolours, §7). What each room's air carries, and what its hazards give off while they run,
+is 04 §6.
 
 ---
 

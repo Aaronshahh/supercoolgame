@@ -63,8 +63,32 @@ export interface Look {
   shade: [number, number, number]
   /** Loose debris decals on the floor, as a fraction of the default density. */
   debris: number
-  /** Render-only weather: snow drifting over the room. */
-  snowfall?: boolean
+  /** Render-only weather and air (docs/04 §6): what drifts through the room when nothing is happening. */
+  ambient: Ambient[]
+  /** Colour of the dust a footstep or a landing kicks up here (snow puffs white, earth puffs brown). */
+  dust: string
+  /** Snow: footsteps leave prints that melt away. Ice-rink rooms get skate scratches instead (per tile, not per look). */
+  prints?: string
+}
+
+/** One kind of ambient particle a room's air carries. */
+export type AmbientKind =
+  | 'mote' // dust hanging in the light
+  | 'drip' // water off a cave ceiling
+  | 'leaf' // off the canopy
+  | 'ember' // up out of the floor cracks
+  | 'flake' // snow
+  | 'wisp' // steam or smoke threads
+  | 'grit' // pebbles shaken off the walls
+  | 'smoke' // heavier dark smoke
+
+export interface Ambient {
+  kind: AmbientKind
+  /** Spawns per second over a reference room's worth of view (36×19 tiles); scaled to the view in play. */
+  rate: number
+  /** Where it starts: over open floor, against a wall (the tile below a wall), on tall grass, or anywhere. */
+  where: 'floor' | 'wall' | 'grass' | 'anywhere'
+  colors: string[]
 }
 
 const SHADE: [number, number, number] = [8, 5, 12]
@@ -93,6 +117,12 @@ const STONE: Look = {
   pitWallDark: PAL.pitWallDark,
   shade: SHADE,
   debris: 1,
+  // a cellar: dust in the torchlight, the odd pebble off the brickwork
+  ambient: [
+    { kind: 'mote', rate: 2.5, where: 'floor', colors: [PAL.boneDark, PAL.cream] },
+    { kind: 'grit', rate: 0.25, where: 'wall', colors: [PAL.brickMortar, PAL.wallCapEdge] },
+  ],
+  dust: PAL.boneDark,
 }
 
 export const LOOKS: Record<string, Look> = {
@@ -121,6 +151,12 @@ export const LOOKS: Record<string, Look> = {
     faceDark: '#3e322c',
     pitWall: '#4a3f3a',
     pitWallDark: '#2d2624',
+    // a cave: water drips off the unseen ceiling, dust hangs in the air
+    ambient: [
+      { kind: 'drip', rate: 1.2, where: 'floor', colors: ['#7fa6bd'] },
+      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#6a5d55'] },
+    ],
+    dust: '#6a5a4c',
   },
 
   /** The Greenhouse: a bamboo grove. Earth and moss underfoot, stalks for walls, leaves on top. */
@@ -146,6 +182,12 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#2a3a1e',
     faceDark: '#5c6a2c',
     debris: 0.5,
+    // a grove: leaves come down off the canopy, pale motes drift between the stalks
+    ambient: [
+      { kind: 'leaf', rate: 1.6, where: 'wall', colors: ['#9aa84e', '#6a8a3a', '#c8b060'] },
+      { kind: 'mote', rate: 1.2, where: 'grass', colors: ['#d2dc8a'] },
+    ],
+    dust: '#6a5a42',
   },
 
   /** The Forge: charcoal slabs with embers in the cracks, blackened red brick. */
@@ -168,6 +210,12 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#241412',
     faceDark: '#1a0e0c',
     debris: 0.6,
+    // a forge: embers lift out of the cracks in the floor, a little smoke hangs by the walls
+    ambient: [
+      { kind: 'ember', rate: 4, where: 'floor', colors: [PAL.flameO, PAL.flameR] },
+      { kind: 'smoke', rate: 0.35, where: 'wall', colors: ['#1a1416'] },
+    ],
+    dust: '#4a3a38',
   },
 
   /** The Laboratory: clean two-tone tiles, riveted panels, nothing on the floor. */
@@ -191,6 +239,9 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#30343e',
     faceDark: '#444a56',
     debris: 0,
+    // a lab: clean air, steam leaking from the seams of the panels
+    ambient: [{ kind: 'wisp', rate: 0.9, where: 'wall', colors: ['#9aa4b8'] }],
+    dust: '#6c7288',
   },
 
   /** The Armoury: iron plates underfoot, cold grey dressed stone. */
@@ -214,6 +265,12 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#2e2c34',
     faceDark: '#3e3a46',
     debris: 0.8,
+    // an armoury: grey dust, grit off the old stone
+    ambient: [
+      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#8e8a98'] },
+      { kind: 'grit', rate: 0.3, where: 'wall', colors: ['#5e5e6a'] },
+    ],
+    dust: '#6a6a76',
   },
 
   /** The Icebox: a frozen waste. Snow for floor, ice blocks for walls, dark water in the holes. */
@@ -242,7 +299,10 @@ export const LOOKS: Record<string, Look> = {
     pitWallDark: '#2f516a',
     shade: [30, 50, 80],
     debris: 0,
-    snowfall: true,
+    // a frozen waste: snow falls over everything and settles; footsteps leave prints that melt
+    ambient: [{ kind: 'flake', rate: 22, where: 'anywhere', colors: ['#f0f8ff'] }],
+    dust: '#eef5fa',
+    prints: '#8aa6ba',
   },
 
   /** The Gatehouse: cobbles and warm sandstone. */
@@ -266,6 +326,12 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#4a3c2a',
     faceDark: '#6a5a40',
     debris: 0.6,
+    // a keep: warm dust, sand trickling off the sandstone
+    ambient: [
+      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#c8b48a'] },
+      { kind: 'grit', rate: 0.5, where: 'wall', colors: ['#a08a62', '#766858'] },
+    ],
+    dust: '#80705e',
   },
 
   /** The Chapel: a checkered floor, pale limestone, dark windows. Lit by its chandeliers alone. */
@@ -289,6 +355,9 @@ export const LOOKS: Record<string, Look> = {
     faceMortar: '#3a343a',
     faceDark: '#4a4248',
     debris: 0.4,
+    // a chapel: dust turning in the candlelight (the chandeliers add their own candle smoke)
+    ambient: [{ kind: 'mote', rate: 3, where: 'floor', colors: [PAL.cream, PAL.boneDark] }],
+    dust: '#605666',
   },
 }
 

@@ -3,22 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Boomerangeon — style demo</title>
+    <title>Boomerangeon</title>
     <style>
       html, body { margin: 0; height: 100%; background: #0a080c; overflow: hidden; }
-      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-             font: 12px/1.4 ui-monospace, Menlo, monospace; color: #6a5e70; }
-      #game canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: none; }
-      #hint { user-select: none; }
+      body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+             font: 11px/1.4 ui-monospace, Menlo, monospace; color: #6a5e70; }
+      #game canvas { display: block; cursor: none; }
+      #hint { user-select: none; white-space: nowrap; }
       #hint b { color: #a89aae; font-weight: 600; }
     </style>
   </head>
   <body>
     <div id="game"></div>
-    <div id="hint">
-      <b>WASD</b> move · <b>mouse</b> aim · <b>LMB</b> throw (hold to hover, release to recall) · <b>RMB</b> melee · <b>Space</b> dash ·
-      <b>1–4</b> character · <b>L</b> lighting · <b>Tab</b> next arena (<b>Shift+Tab</b> back, or click the <b>&lt; &gt;</b> in the HUD)
-    </div>
-    <script type="module" src="/src/demo/main.ts"></script>
+    <div id="hint"><b>Arrows</b> / <b>WASD</b> move · <b>Enter</b> select · <b>Esc</b> back · the mouse works too</div>
+    <script type="module" src="/src/game/app.ts"></script>
   </body>
 </html>

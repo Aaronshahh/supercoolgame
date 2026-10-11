@@ -1,27 +1,13 @@
 /**
- * Character sprites, 14×18, feet on the bottom row. Pure data — built into canvases by
- * render/pixelart.ts. One file per character under ./chars/.
- *
- * Key: . transparent  o outline  P primary  p primary-dark  h primary-light
- *      w white  k pupil  b bone  d bone-dark  c cream  C cream-dark  r red  g grey
- *      T wood-light  t wood  (the boomerang baked into catch frames)
- *
- * `side` frames face RIGHT; the renderer mirrors them for left. `down`/`up` action frames put
- * the arm on the RIGHT and are mirrored when the aim points left. `roll` frames tumble to the
- * right and are mirrored for leftward dashes.
- *
- * Frame meanings (the sim maps its timers onto these indices in demo/main.ts playerSprite):
- *   stand [one idle pose per facing]
- *   run   [a 4-frame cycle per facing, each character's own gait: the slime sloshes along like a
- *          slug, Skully does a shuffling dance, the shroom walks on stubby legs, the frog hops.
- *          `runPeriod` is ticks per frame; `runLift[i]` is how many px frame i is drawn above
- *          the shadow (0 = feet on the ground). `leavesTrail` marks a character that smears the
- *          floor as it goes (the slime).]
- *   throw [release (arm out toward the aim), follow-through]
- *   catch [reach (boomerang about to arrive), clutch (just caught, boomerang in the hands)]
- *   melee [windup, swing, recover]
- *   roll  [tuck, ¼, ½, ¾]  — one tumble over the 8-tick dash, no facing variants
+ * Character sprites, 14×18, feet on the bottom row. One file per character in chars/.
+ * The renderer compiles the pixel grids into coloured and mirrored canvases.
+ * Side frames face right; up/down action frames mirror with aim. Roll frames mirror
+ * for leftward dashes. Optional frame holds give the three new animals their own gait.
+ * See docs/notes-character-motion.md for the original seven-character roster.
  */
+import { OCTOPUS } from './chars/octopus.ts'
+import { HEDGEHOG } from './chars/hedgehog.ts'
+import { FISH } from './chars/fish.ts'
 import { FROG } from './chars/frog.ts'
 import { SHROOM } from './chars/shroom.ts'
 import { SKELETON } from './chars/skully.ts'
@@ -29,6 +15,8 @@ import { SLIME } from './chars/slime.ts'
 
 export const CHAR_W = 14
 export const CHAR_H = 18
+
+export type Facing = 'down' | 'side' | 'up'
 
 export interface FacingFrames {
   down: string[][]
@@ -38,6 +26,15 @@ export interface FacingFrames {
 
 export interface CharacterArt {
   name: string
+  /** A short description shown with the animated character preview. */
+  style?: string
+  portraitFacing?: Facing
+  /** Authored holds in simulation ticks; these only choose drawings, never alter movement. */
+  idleTicks?: number[]
+  runTicks?: number[]
+  throwTicks?: number[]
+  /** Run pose that lands with a small dust puff. */
+  landingFrame?: number
   stand: FacingFrames
   run: FacingFrames
   runPeriod: number
@@ -49,4 +46,20 @@ export interface CharacterArt {
   roll: string[][]
 }
 
-export const CHARACTERS: CharacterArt[] = [SLIME, SKELETON, SHROOM, FROG]
+export const CHARACTERS: CharacterArt[] = [SLIME, SKELETON, SHROOM, FROG, OCTOPUS, HEDGEHOG, FISH]
+
+/** The same character range is used by profile storage, URL shortcuts and multiplayer messages. */
+export function characterIndex(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(CHARACTERS.length - 1, Math.round(value))) : 0
+}
+
+/** Variable frame holds let a planted foot linger and a snap move quickly. */
+export function timedFrame(tick: number, durations: readonly number[], loop = true): number {
+  const total = durations.reduce((sum, n) => sum + n, 0)
+  let t = loop ? ((tick % total) + total) % total : Math.max(0, Math.min(total - 1, tick))
+  for (let i = 0; i < durations.length; i++) {
+    if (t < durations[i]) return i
+    t -= durations[i]
+  }
+  return durations.length - 1
+}

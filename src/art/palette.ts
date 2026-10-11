@@ -67,6 +67,11 @@ export const PAL = {
   portalOrange: '#ff6a1a',
   portalOrangeLight: '#ffd0a0',
   portalOrangeDark: '#200a03',
+  // power-up accents (docs/03): the two hues nothing else in the game uses, for the shield and blink
+  teal: '#4fd1c5',
+  tealDark: '#1f6f6a',
+  violet: '#b873e8',
+  violetDark: '#5a2f80',
 
   bg: '#0a080c',
   hud: '#0e0a12',
