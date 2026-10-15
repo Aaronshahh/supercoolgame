@@ -91,5 +91,5 @@ export async function renderSong(key: string) {
   const bytes = new Uint8Array(wav)
   let binary = ''
   for (let i=0;i<bytes.length;i+=32768) binary += String.fromCharCode(...bytes.subarray(i,i+32768))
-  return { key, title:song.title, reverb:song.reverb, seconds:length/sr, peak:peak*scale, rms:rms*scale, wav:btoa(binary) }
+  return { key, title:song.title, reverb:song.reverb, bpm:song.bpm, seconds:length/sr, peak:peak*scale, rms:rms*scale, wav:btoa(binary) }
 }

@@ -451,6 +451,27 @@ export function drawChandelier(g: G, x: number, y: number, height: number, ay: n
   }
 }
 
+/** Mirror ball hanging `height` px over (x, y), chained up to `ay`; its facet grid creeps with tick. */
+export function drawMirrorBall(g: G, x: number, y: number, height: number, ay: number, jitter: number, tick: number) {
+  const cx = x + jitter
+  const cy = y - height
+  fillEllipse(g, x, y, 7, 3, 'rgba(4,3,8,0.4)')
+  dotted(g, cx, cy - 6, x, ay, 2, PAL.metal)
+  fillEllipse(g, cx, cy, 6, 6, PAL.outline)
+  fillEllipse(g, cx, cy, 5, 5, PAL.metal)
+  // the facet grid, slid sideways by the tick so the ball reads as turning
+  const off = (tick >> 3) % 3
+  g.fillStyle = PAL.metalLight
+  for (let dy = -4; dy <= 4; dy += 2) {
+    const hw = Math.round(Math.sqrt(Math.max(0, 23 - dy * dy)))
+    for (let dx = -hw + ((dy >> 1) + off + 9) % 3; dx <= hw; dx += 3) g.fillRect(cx + dx, cy + dy, 1, 1)
+  }
+  // one hard glint, hopping facet to facet
+  const gl = hash2(tick >> 3, 7, 3)
+  px(g, cx - 3 + Math.floor(gl * 6), cy - 3 + Math.floor(hash2(tick >> 3, 11, 5) * 4), PAL.white)
+  fillEllipse(g, cx - 2, cy - 2, 2, 2, 'rgba(255,255,255,0.25)')
+}
+
 /** What a chandelier leaves on the floor. */
 export function drawRubble(g: G, x: number, y: number) {
   ringEllipse(g, x, y, 8, 3, PAL.ironLight)

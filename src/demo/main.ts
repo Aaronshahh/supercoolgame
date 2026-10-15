@@ -30,18 +30,18 @@
  */
 import { CHARACTERS, characterIndex, timedFrame, type FacingFrames } from '../art/characters.ts'
 import { CHAR_KEY, PAL, PLAYER_COLORS, PROP_KEY, darken, lighten, rgba, withPrimary } from '../art/palette.ts'
-import { BARREL, BOOMERANG, CRATE, SHADOW_BOOM, SHADOW_DUDE, TORCH } from '../art/props.ts'
+import { BARREL, BOOMERANG, CRATE, LAMP, LANTERN, SHADOW_BOOM, SHADOW_DUDE, TORCH } from '../art/props.ts'
 import { POWER_GLYPHS, POWER_KEY, badgeRows } from '../art/powerups.ts'
 import * as art from '../render/hazardArt.ts'
 import { Fx } from '../render/fx.ts'
 import * as part from '../render/powerupArt.ts'
 import { Lightmap, type Light } from '../render/lighting.ts'
-import { ctx2d, flipX, rotate90, silhouette, spriteFromRows, type Sprite } from '../render/pixelart.ts'
+import { ctx2d, flipX, makeCanvas, rotate90, silhouette, spriteFromRows, type Sprite } from '../render/pixelart.ts'
 import { createScreen, type Screen } from '../render/screen.ts'
 import { drawText, textWidth } from '../render/text.ts'
-import { TILE, TileKind, beltDir, isBelt, parseArena, redrawCells, renderArenaStatic, tileAt, type ArenaMap, type GrassAt } from '../render/tiles.ts'
+import { TILE, TileKind, beltDir, drawGear, gearAt, isBelt, parseArena, redrawCells, renderArenaStatic, tileAt, type ArenaMap, type GrassAt } from '../render/tiles.ts'
 import { LOOKS, type Ambient, type Look } from '../render/looks.ts'
-import { hash2, mulberry32 } from '../util/rng.ts'
+import { hash2, hashInt, mulberry32 } from '../util/rng.ts'
 import { dcos, dsin } from '../util/trig.ts'
 import { ARENA_BRAWL, ARENA_FLOOR, ARENA_STRIP, type ArenaDef } from './arena.ts'
 import { ARENAS, ARENA_LIST, type ArenaEntry } from './arenas.ts'
@@ -355,6 +355,34 @@ const grassLook: GrassAt = (c, r) => {
 }
 let staticLayer!: HTMLCanvasElement
 let staticCtx!: CanvasRenderingContext2D
+// a sky room's cloud sea: two strips (far, near) tiled under the pits at different parallax
+let cloudStrips: HTMLCanvasElement[] | null = null
+
+/** One room-tall strip of pixel clouds that tiles horizontally (each cloud is drawn wrapped). */
+function makeCloudStrip(w: number, h: number, salt: number, body: string, shadowColor: string): HTMLCanvasElement {
+  const cv = makeCanvas(w, h)
+  const g = ctx2d(cv)
+  const rng = mulberry32(hashInt(salt, w, h))
+  const n = Math.round((w * h) / 2600)
+  for (let i = 0; i < n; i++) {
+    const cx = Math.floor(rng() * w)
+    const cy = Math.floor(rng() * h)
+    const cw = 14 + Math.floor(rng() * 22)
+    for (const ox of [0, -w, w]) {
+      // three stacked bars, each shorter than the one below, over a shadow line
+      let bw = cw
+      for (let row = 0; row < 3; row++) {
+        const bx = cx + ox + Math.floor((cw - bw) * (0.3 + rng() * 0.4))
+        g.fillStyle = body
+        g.fillRect(bx, cy - row * 2, bw, 2)
+        bw = Math.max(4, bw - 4 - Math.floor(rng() * 6))
+      }
+      g.fillStyle = shadowColor
+      g.fillRect(cx + ox + 1, cy + 2, cw - 2, 1)
+    }
+  }
+  return cv
+}
 
 function idx(c: number, r: number): number {
   return r * arena.cols + c
@@ -479,6 +507,9 @@ function loadArena(d: ArenaDef) {
   vfx.reset(seed * 7919 + arena.cols * 131 + arena.rows)
   staticLayer = renderArenaStatic(arena, seed, grassLook, look)
   staticCtx = ctx2d(staticLayer)
+  cloudStrips = look.sky
+    ? [makeCloudStrip(320, WORLD_H, seed + 1, '#dce8f4', '#aac4e0'), makeCloudStrip(256, WORLD_H, seed + 2, '#ffffff', '#c4daf0')]
+    : null
 
   solid = new Uint8Array(n)
   for (let i = 0; i < arena.tiles.length; i++) solid[i] = arena.tiles[i] === TileKind.Wall ? 1 : 0
@@ -740,7 +771,8 @@ function darknessAt(x: number): number {
  * as a dark zone.
  */
 function ambientAt(x: number): number {
-  let d = 0.4 + (DARK_AMBIENT - 0.4) * darknessAt(x)
+  const base = look.ambientLight ?? 0.4
+  let d = base + (DARK_AMBIENT - base) * darknessAt(x)
   if (def.lightSource === 'chandeliers' && chandeliers.length) {
     let lit = 0
     for (const ch of chandeliers) lit += ch.state === 'rubble' ? Math.max(0, 1 - ch.t / CHANDELIER_FADE) : 1
@@ -795,6 +827,8 @@ const boomSets: Sprite[][] = PLAYER_COLORS.map((col) => {
 const crateSprite = spriteFromRows(CRATE, PROP_KEY, 'crate')
 const barrelSprite = spriteFromRows(BARREL, PROP_KEY, 'barrel')
 const torchFrames = TORCH.map((f) => spriteFromRows(f, PROP_KEY, 'torch'))
+const lanternFrames = LANTERN.map((f) => spriteFromRows(f, PROP_KEY, 'lantern'))
+const lampFrames = LAMP.map((f) => spriteFromRows(f, PROP_KEY, 'lamp'))
 const shadowDude = spriteFromRows(SHADOW_DUDE, PROP_KEY, 'shadow')
 const shadowBoom = spriteFromRows(SHADOW_BOOM, PROP_KEY, 'shadow')
 // power-up badges: the 7×7 glyph on a dark 9×9 tile; the pickup on the floor, the HUD and the stack over a head
@@ -1181,13 +1215,16 @@ function stepAtmosphere() {
       }
     }
   }
-  // torches: an ember off the flame now and then, a thread of smoke less often
+  // fixtures: a torch sheds an ember now and then and a thread of smoke less often; a paper
+  // lantern or an enclosed lamp just breathes the odd wisp
   arena.props.forEach((pr, i) => {
     if (pr.kind !== 'torch' || !inView(pr.c * TILE)) return
     const x = pr.c * TILE + 7
     const y = pr.r * TILE + 16
-    if ((tick + i * 7) % 18 === 0) vfx.embers(x, y, 1, 10, 2)
-    if ((tick + i * 13) % 80 === 0) vfx.smoke(x, y, 1, '#3a3038', 13, 1)
+    if (!look.fixture) {
+      if ((tick + i * 7) % 18 === 0) vfx.embers(x, y, 1, 10, 2)
+      if ((tick + i * 13) % 80 === 0) vfx.smoke(x, y, 1, '#3a3038', 13, 1)
+    } else if ((tick + i * 13) % 60 === 0) vfx.ambient('wisp', x, y - 10, look.fixture === 'lantern' ? '#e8dcc0' : '#8a8292')
   })
   // lit vents spit; burning floor lifts embers and the odd puff of smoke
   for (let r = 0; r < arena.rows; r++)
@@ -1218,14 +1255,19 @@ function stepAtmosphere() {
       if (!inView(m.x)) continue
       if ((tick + m.c * 3) % 12 === 0) vfx.ambient('mote', m.x + m.nx * 3 + (vfx.rng() - 0.5) * 8, m.y + m.ny * 3 + (vfx.rng() - 0.5) * 4, m.col)
     }
-  // candles: hanging chandeliers give off wisps of smoke; the fallen ones smoulder for a while
+  // candles: hanging chandeliers give off wisps of smoke; the fallen ones smoulder for a while.
+  // Mirror balls neither smoke nor smoulder — a dropped one just glints in the wreck for a bit.
   for (const ch of chandeliers) {
     if (!inView(ch.x)) continue
     if (ch.state === 'hang' || ch.state === 'creak') {
-      if ((tick + ch.x) % 16 === 0) vfx.ambient('wisp', ch.x + (vfx.rng() - 0.5) * 12, ch.y - CHANDELIER_HEIGHT + 2, '#3a3038')
+      if (!look.mirror && (tick + ch.x) % 16 === 0) vfx.ambient('wisp', ch.x + (vfx.rng() - 0.5) * 12, ch.y - CHANDELIER_HEIGHT + 2, '#3a3038')
     } else if (ch.state === 'rubble' && ch.t < CHANDELIER_FADE / 2) {
-      if (vfx.rng() < 0.08) vfx.embers(ch.x + (vfx.rng() - 0.5) * 12, ch.y + (vfx.rng() - 0.5) * 6, 1, 2, 1)
-      if (vfx.rng() < 0.04) vfx.smoke(ch.x, ch.y, 1, '#2a2230', 4, 4)
+      if (look.mirror) {
+        if (vfx.rng() < 0.05) vfx.sparks(ch.x + (vfx.rng() - 0.5) * 12, ch.y + (vfx.rng() - 0.5) * 6, '#dce8ff', 1, 0.3, 4)
+      } else {
+        if (vfx.rng() < 0.08) vfx.embers(ch.x + (vfx.rng() - 0.5) * 12, ch.y + (vfx.rng() - 0.5) * 6, 1, 2, 1)
+        if (vfx.rng() < 0.04) vfx.smoke(ch.x, ch.y, 1, '#2a2230', 4, 4)
+      }
     }
   }
   // a power-up waiting on the floor glints
@@ -4337,6 +4379,55 @@ function render() {
   ctx.translate(-cx + shx, HUD_H + shy)
   ctx.drawImage(staticLayer, x0 - 8, 0, W + 16, WORLD_H, x0 - 8, 0, W + 16, WORLD_H)
 
+  // a sky room's pits are windows onto open air: a sky gradient and two cloud layers drifting at
+  // different parallax, clipped to the pit cells (minus the rock skirt the static layer drew)
+  if (look.sky && cloudStrips) {
+    ctx.save()
+    ctx.beginPath()
+    for (let r = 0; r < arena.rows; r++)
+      for (let c = c0; c <= c1; c++) {
+        if (tileAt(arena, c, r) !== TileKind.Pit) continue
+        const skirt = tileAt(arena, c, r - 1) !== TileKind.Pit ? 8 : 0
+        ctx.rect(c * TILE, r * TILE + skirt, TILE, TILE - skirt)
+      }
+    ctx.clip()
+    const grad = ctx.createLinearGradient(0, 0, 0, WORLD_H)
+    grad.addColorStop(0, '#4a9fe8')
+    grad.addColorStop(1, '#aee0f8')
+    ctx.fillStyle = grad
+    ctx.fillRect(x0 - 8, 0, W + 16, WORLD_H)
+    for (let layer = 0; layer < 2; layer++) {
+      const strip = cloudStrips[layer]
+      const par = layer === 0 ? 0.25 : 0.5 // of the camera; the rest of the shift pins it below
+      const auto = layer === 0 ? 0.06 : 0.12 // px/tick of wind
+      const shift = Math.floor(cx * (1 - par) - tick * auto)
+      const first = x0 - 8 - ((((x0 - 8 - shift) % strip.width) + strip.width) % strip.width)
+      ctx.globalAlpha = layer === 0 ? 0.8 : 1
+      for (let sx = first; sx < x1 + 8; sx += strip.width) ctx.drawImage(strip, sx, 0)
+    }
+    ctx.globalAlpha = 1
+    ctx.restore()
+  }
+
+  // the dance floor pulses through its hues on the music's beat — hue only, never value: the
+  // 'color' composite keeps the checker's own near-black luminosity under whatever we lay on it
+  if (look.floorCycle) {
+    const beats = music.beatPhase() ?? tick / 33
+    const beat = Math.floor(beats)
+    const env = 1 - (beats - beat) // snaps bright on the beat, dies into the next
+    ctx.save()
+    ctx.globalCompositeOperation = 'color'
+    for (let r = 0; r < arena.rows; r++)
+      for (let c = c0; c <= c1; c++) {
+        const k = tileAt(arena, c, r)
+        if (k !== TileKind.Floor && k !== TileKind.Crumble) continue
+        const par = (c + r) & 1
+        ctx.fillStyle = rgba(look.floorCycle[(beat + par * 2) % look.floorCycle.length], (0.25 + 0.4 * env) * (par ? 1 : 0.7))
+        ctx.fillRect(c * TILE, r * TILE, TILE, TILE)
+      }
+    ctx.restore()
+  }
+
   const lights: Light[] = [] // world coords; shifted to the screen when composed
   const drawables: Drawable[] = []
   const overhead: (() => void)[] = [] // things hanging above everyone
@@ -4368,6 +4459,20 @@ function render() {
     }
   }
 
+  // the clockwork's gears, half-sunk in the wall faces, click forward one step per spike phase —
+  // the room telegraphs the hazard's rhythm; per frame so they can turn, hash-placed like the faces
+  if (look.wall === 'gears') {
+    const ph = tick % (SPIKE_CYCLE.off + SPIKE_CYCLE.warn + SPIKE_CYCLE.on)
+    const step = ph >= SPIKE_CYCLE.off + SPIKE_CYCLE.warn ? 2 : ph >= SPIKE_CYCLE.off ? 1 : 0
+    for (let r = 0; r < arena.rows; r++)
+      for (let c = c0; c <= c1; c++) {
+        if (tileAt(arena, c, r) !== TileKind.Wall || tileAt(arena, c, r + 1) === TileKind.Wall) continue
+        if (!gearAt(c, r, seed)) continue
+        if (arena.props.some((p) => p.kind === 'torch' && p.c === c && p.r === r)) continue
+        drawGear(ctx, c * TILE, r * TILE, step, look)
+      }
+  }
+
   // portal mouths: a blue and an orange oval set into the wall, a flare when used, and a glow in
   // the mouth's colour that spills onto the floor in front and carries in the dark
   for (const po of portals) {
@@ -4380,20 +4485,22 @@ function render() {
     }
   }
 
-  // torches sit on wall faces; animated, so not in the static layer
+  // fixtures (torch, paper lantern or wall lamp, by the look) sit on wall faces; animated, so not
+  // in the static layer
+  const fixFrames = look.fixture === 'lantern' ? lanternFrames : look.fixture === 'lamp' ? lampFrames : torchFrames
   arena.props.forEach((pr, i) => {
     if (pr.kind !== 'torch' || !vis(pr.c * TILE, 120)) return
     const x = pr.c * TILE + 4
     const y = pr.r * TILE + 3
     const frame = Math.floor(tick / 6 + i * 1.7) % 3
-    drawSprite(torchFrames[frame], x, y)
+    drawSprite(fixFrames[frame], x, y)
     const flick = hash2(tick >> 2, i, 99) * 6
     lights.push({
       x: x + 3,
       y: y + 12,
-      r: 100 + flick,
+      r: (look.fixture === 'lantern' ? 84 : 100) + flick,
       a: 1,
-      glow: 'rgba(255,150,60,0.24)',
+      glow: look.fixture === 'lantern' ? 'rgba(255,190,110,0.26)' : 'rgba(255,150,60,0.24)',
       glowR: 64 + flick,
     })
   })
@@ -4405,14 +4512,31 @@ function render() {
     if (ch.state === 'rubble') {
       art.drawRubble(ctx, ch.x, ch.y)
       const left = 1 - ch.t / CHANDELIER_FADE
-      if (left > 0) lights.push({ x: ch.x, y: ch.y, r: 36, a: 0.6 * left, glow: rgba(PAL.flameO, 0.25 * left), glowR: 24 })
+      if (left > 0) lights.push({ x: ch.x, y: ch.y, r: 36, a: 0.6 * left, glow: look.mirror ? `rgba(190,210,255,${0.25 * left})` : rgba(PAL.flameO, 0.25 * left), glowR: 24 })
     } else {
       const height = ch.state === 'fall' ? CHANDELIER_HEIGHT * (1 - ch.t / CHANDELIER_FALL) : CHANDELIER_HEIGHT
       const jitter = ch.state === 'creak' ? (((ch.t >> 1) & 1) ? 1 : -1) : 0
-      overhead.push(() => art.drawChandelier(ctx, ch.x, ch.y, height, ch.ay, jitter, tick))
       // where the chandeliers are the only lights they throw further
       const r = def.lightSource === 'chandeliers' ? 100 : 72
-      lights.push({ x: ch.x, y: ch.y - height, r, a: 0.9, glow: rgba(PAL.flameO, 0.28), glowR: r * 0.6 })
+      if (look.mirror) {
+        overhead.push(() => art.drawMirrorBall(ctx, ch.x, ch.y, height, ch.ay, jitter, tick))
+        lights.push({ x: ch.x, y: ch.y - height, r, a: 0.9, glow: 'rgba(190,210,255,0.26)', glowR: r * 0.6 })
+        // its pale spots wheel slowly across the floor around it, never up a wall or into a pit
+        for (let s = 0; s < 3; s++) {
+          const a = (tick / (210 + s * 40)) * Math.PI * 2 * (s === 1 ? -1 : 1) + s * 2.1 + ch.x * 0.3
+          const sx = ch.x + Math.cos(a) * (24 + s * 14)
+          const sy = ch.y + Math.sin(a) * (10 + s * 6)
+          const t = tileAt(arena, Math.floor(sx / TILE), Math.floor(sy / TILE))
+          if (t === TileKind.Wall || t === TileKind.Pit) continue
+          ctx.fillStyle = 'rgba(214,226,255,0.13)'
+          ctx.beginPath()
+          ctx.ellipse(sx, sy, 7, 3, 0, 0, Math.PI * 2)
+          ctx.fill()
+        }
+      } else {
+        overhead.push(() => art.drawChandelier(ctx, ch.x, ch.y, height, ch.ay, jitter, tick))
+        lights.push({ x: ch.x, y: ch.y - height, r, a: 0.9, glow: rgba(PAL.flameO, 0.28), glowR: r * 0.6 })
+      }
     }
   }
   for (const bl of barrels) {

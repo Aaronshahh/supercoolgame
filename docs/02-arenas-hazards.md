@@ -292,7 +292,9 @@ fires (01 targets 15–40 s); it exists to kill stalemates.
 
 ## 7. Arena roster (first set, built 2026-10-09)
 
-Nine rooms of one dungeon, one hazard family per room, each with the Cellar's 520 open tiles (± 4 %)
+Nine rooms, nine material worlds (redesigned 2026-10-14 on Aaron's "too stony, brick-wally,
+dungeony"; precedent and laws in `docs/notes-environment-design.md`; room keys never changed, five
+titles did), one hazard family per room, each with the Cellar's 520 open tiles (± 4 %)
 in a shape and an environment of its own (§2). The maps live in `src/demo/arenas.ts`,
 `npm run check-arenas` validates them, the demo opens on the first and
 Tab cycles through them in this order (§13), `?arena=<key>` opens one directly. The
@@ -308,14 +310,14 @@ let a boomerang do something new are in, the ones that mostly push bodies around
 | Key | Arena | Theme (hazard family) | Shape · look | Terrain motif | Skill it exercises | Open tiles · blocks |
 |---|---|---|---|---|---|---|
 | `cellar` | **The Cellar** | blocks: crates, barrels | 36 × 19 rectangle · **stone**: the original slabs, brick and purple-black caps, unchanged | four 2 × 2 pillars round a central bowl with a barrel pair at each end; side pillars and crates break the long rows | banks off the pillars, lighting barrel pairs from range, opening lanes through crates. The neutral room: no lethal tile, no mover; every other room is judged against it | 520 · 24 |
-| `pits` | **The Pits** | pits | 40 × 18, wide and low, corners eaten away · **cavern**: dirt floor, rock walls, no straight line | one chasm across the middle; crossings at both ends, a stone bridge in the centre, two crumble bridges that go one-way after first use, two short lifts | throws cross where bodies cannot; a hovered boomerang over the bridge denies it; lift timing | 522 (13 % pit) · 16 |
+| `pits` | **The Spires** | pits | 40 × 18, wide and low, corners long since fallen away · **sky**: a shattered ruin in daylight — pale ashlar with moss, gold glints, the pits open sky with a cloud sea drifting below at two parallax speeds, a dark rim on every walkable edge | one span of open sky across the middle; crossings at both ends, a stone bridge in the centre, two crumble spans that go one-way after first use, two drifting platforms | throws cross where bodies cannot; a hovered boomerang over the bridge denies it; platform timing | 522 (13 % pit) · 16 |
 | `greenhouse` | **The Greenhouse** | grass | 32 × 22, tall and narrow · **bamboo**: earth and moss underfoot, bamboo stalks for walls, leaf canopy on top | 4 × 3 beds, two stands a side, pews of crates; nothing kills | recon by cutting, ambush from a bed with a hovered boomerang, reading rustles | 530 · 16 |
-| `forge` | **The Forge** | fire vents | 34 × 21 octagon · **forge**: charcoal slabs with embers in the cracks, blackened red brick | vent bars in two phases guard the approaches to a furnace block with barrels against it | cross on OFF, throw through ON to light the boomerang, barrel chains at range | 528 · 8 |
+| `forge` | **The Kitchen** | fire vents | 34 × 21 octagon · **kitchen**: cream-and-terracotta checker, glazed wall tiles over a stainless band, hanging copper pans — the room cool and clean so the burners' orange pops | burner bars in two phases guard the approaches to the great stove block with barrels against it | cross on OFF, throw through ON to light the boomerang, barrel chains at range | 528 · 8 |
 | `lab` | **The Laboratory** | portals | 36 × 22 H: two bays and a bridge · **lab**: two-tone tiles, riveted panels, no debris | three fixed blue/orange pairs: the middle row wraps through the side walls, a column of each bay wraps top to bottom; two 2 × 2 blocks and crates for banks | throws that arrive from behind, a mouth as an escape hatch, aiming through the hop with the preview | 522 · 12 |
-| `armoury` | **The Armoury** | spikes | 38 × 18 long hall with pilasters · **armoury**: riveted iron plates, grey dressed stone | two bands in opposite phase separate the north and south strips from a bowl between two 2 × 4 racks | cross on the beat, throw across the band you cannot cross, banks off the racks | 518 · 16 |
+| `armoury` | **The Clockwork** | spikes | 38 × 18 long hall with pilasters · **clockwork**: dark planks with brass rivets, cold steel-blue walls with brass gears half-sunk in them, clicking forward on the spike beat so the room telegraphs the rhythm | two bands in opposite phase separate the north and south strips from a bowl between two 2 × 4 housings | cross on the beat, throw across the band you cannot cross, banks off the housings | 518 · 16 |
 | `icebox` | **The Icebox** | ice | 38 × 21 rounded pond · **frost**: snow floor, ice-block walls with a bright rim, black water in the hole, snow falling | the rink fills the pond, a hole at its centre, snow patches to catch yourself on, bumpers at the rink corners, the spawns on the snow bank | leading a sliding target, throwing while you slide, banks off the bumpers, dash slides that compound on ice. The roster's one friction room | 528 (2 % pit) · 0 |
-| `gatehouse` | **The Gatehouse** | gates | 36 × 21, two towers and a keep under a wall-walk · **keep**: cobbles, warm sandstone | the keep's walls have two gated doorways a side; top and bottom gate rows run in opposite phase so one row is always open; a pendulum sweeps the wall-walk | throws through a gate about to close, closed gates as bank walls, the pendulum walk as a dash-timed shortcut | 522 · 36 (the keep's free-standing walls count) |
-| `chapel` | **The Chapel** | chandeliers | 40 × 22 Latin cross: apse, nave, transept · **chapel**: checkered floor, pale ashlar with dark arched windows | four chandeliers staggered over the nave, pews of crates, an altar block in the apse. **Dark: no torches, the chandeliers are the only lights**, and every one dropped leaves the room darker, to near-black with all four down (Aaron, 2026-10-09) | dropping a chandelier on someone with a throw, baiting people under one, choosing between light and a kill, the altar as a bank | 514 · 12 |
+| `gatehouse` | **The Shrine** | gates | 36 × 21, two halls and an inner sanctum under a walkway · **shrine**: tatami laid in alternating mats, shoji panels with the odd pane lamplit from behind, vermillion rationed to the beams, paper lanterns at the torch anchors | the sanctum's walls have two sliding doors a side; top and bottom rows run in opposite phase so one row is always open; a censer swings across the walkway | throws through a door about to close, closed doors as bank walls, the censer walk as a dash-timed shortcut | 522 · 36 (the sanctum's free-standing walls count) |
+| `chapel` | **The Discotheque** | chandeliers | 40 × 22 Latin cross: DJ stand, dance floor, lounge (Aaron's "disco ball room") · **disco**: a near-black club, the checker dance floor value-locked and cycling hue only on the music's beat, neon trim in pink and cyan, speaker boxes | four mirror balls staggered over the dance floor, crates stacked like road cases, a block at the stand. **Dark: no torches, the mirror balls are the only lights**, and every one dropped leaves the club darker, to near-black with all four down (Aaron, 2026-10-09) | dropping a mirror ball on someone with a throw, baiting people under one, choosing between light and a kill, the stand as a bank | 514 · 12 |
 
 Deferred, with the reason from the notes: **The Mine** (autonomous carts) and **The Sewer** (belts)
 move bodies and dropped boomerangs rather than thrown ones, which the rubric scores as encumbering;
@@ -328,14 +330,19 @@ deferred rooms stay in the demo strip (§13) for Aaron to try. A cart the boomer
 lever, the cart goes) is worth a revisit. The literature also says fewer rooms played more: expect
 to cull to six to eight after playing at two and at six players.
 
-Looks (the environments, `src/render/looks.ts`; 04 will refine the colours): **stone** (Cellar, the
-original), **cavern** (Pits: packed dirt, rock), **bamboo** (Greenhouse: earth and moss, stalks,
-canopy), **forge** (charcoal, embers, dark red brick), **lab** (two-tone tiles, riveted panels),
-**armoury** (iron plates, grey ashlar), **frost** (Icebox: snow, ice blocks, black water, falling
-snow, blue-grey shadows), **keep** (Gatehouse: cobbles, sandstone), **chapel** (checkerboard, pale
-ashlar, dark arched windows). Each look is a palette plus one of a few procedural styles for the
+Looks (the environments, `src/render/looks.ts`; redesigned 2026-10-14 per
+`docs/notes-environment-design.md` — nine material worlds, no two sharing a palette family):
+**stone** (Cellar, the original and the anchor the exotic rooms contrast against), **sky** (Spires:
+pale ashlar and moss, open daylight below), **bamboo** (Greenhouse: earth and moss, stalks,
+canopy), **kitchen** (checker, glazed tile, copper), **lab** (two-tone tiles, riveted panels),
+**clockwork** (planks, steel-blue, brass gears), **frost** (Icebox: snow, ice blocks, black water,
+falling snow, blue-grey shadows), **shrine** (tatami, shoji, vermillion), **disco** (near-black,
+hue-cycling dance floor, neon). Each look is a palette plus one of a few procedural styles for the
 floor, the wall cap and the wall face, so a new room costs a few colours rather than a tileset.
-The Laboratory's portal blue and orange stay reserved for the portals.
+Mechanics own their colours in every room: the hazard glyphs are pixel-identical across all nine,
+and no room palette uses the portal blue/orange, the flame orange or the ice cyan at high
+saturation. The music's titles still name the old fiction (e.g. the Discotheque plays "Requiem");
+to revisit with Aaron.
 
 Spawns: 6 per arena on the wall ring, each pair mirrored; the validator enforces the distances in
 §2 and the stats column above comes from its output.

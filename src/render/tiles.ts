@@ -1,7 +1,7 @@
 import { PAL, PROP_KEY, rgba } from '../art/palette.ts'
 import { DEBRIS } from '../art/props.ts'
 import { hash2, hashInt, mulberry32, type Rng } from '../util/rng.ts'
-import { LOOKS, WINDOW_FRAME, WINDOW_PANES, type Look } from './looks.ts'
+import { LOOKS, type Look } from './looks.ts'
 import { ctx2d, makeCanvas, spriteFromRows } from './pixelart.ts'
 
 export const TILE = 16
@@ -208,6 +208,12 @@ function drawFloor(g: CanvasRenderingContext2D, c: number, r: number, seed: numb
     case 'checker':
       drawChecker(g, c, r, seed, look)
       break
+    case 'planks':
+      drawPlanks(g, c, r, seed, look)
+      break
+    case 'tatami':
+      drawTatami(g, c, r, seed, look)
+      break
   }
 }
 
@@ -413,6 +419,74 @@ function drawChecker(g: CanvasRenderingContext2D, c: number, r: number, seed: nu
   if (rng() < 0.1) crackWalk(g, x, y, rng, look.floorCrack, 4 + Math.floor(rng() * 4))
 }
 
+/** Wood planks in 4 px courses running 32 px before a joint; the odd pair of brass rivets. */
+function drawPlanks(g: CanvasRenderingContext2D, c: number, r: number, seed: number, look: Look) {
+  const x = c * TILE
+  const y = r * TILE
+  const rng = tileRng(c, r, seed)
+  for (let i = 0; i < 4; i++) {
+    const py = y + i * 4
+    const course = r * 4 + i
+    g.fillStyle = pick(look.floors, hash2((c + ((course & 1) ? 1 : 0)) >> 1, course, seed))
+    g.fillRect(x, py, TILE, 4)
+    g.fillStyle = look.floorMortar
+    g.fillRect(x, py + 3, TILE, 1)
+    // a grain glint, and the plank's end joint when it lands inside this tile
+    if (rng() < 0.4) {
+      g.fillStyle = look.floorLight
+      g.fillRect(x + Math.floor(rng() * 10), py + 1, 3 + Math.floor(rng() * 3), 1)
+    }
+    const jx = Math.floor(hash2(c, course, seed + 3) * 24)
+    if (jx < 16) {
+      g.fillStyle = look.floorCrack
+      g.fillRect(x + jx, py, 1, 3)
+    }
+  }
+  // a pair of brass rivets where a joist runs under the boards
+  if (rng() < 0.18) {
+    const px = 2 + Math.floor(rng() * 11)
+    const py = 1 + Math.floor(rng() * 13)
+    g.fillStyle = look.floorSpeck
+    g.fillRect(x + px, y + py, 1, 1)
+    g.fillRect(x + px + 2, y + py, 1, 1)
+  }
+}
+
+/**
+ * Tatami: 2×1-tile mats with dark borders. Each 2×2 block holds either two mats side by side or
+ * two stacked, alternating per block — the layout is what reads as tatami, more than the weave.
+ */
+function drawTatami(g: CanvasRenderingContext2D, c: number, r: number, seed: number, look: Look) {
+  const x = c * TILE
+  const y = r * TILE
+  const rng = tileRng(c, r, seed)
+  const horiz = (((c >> 1) + (r >> 1)) & 1) === 0
+  g.fillStyle = pick(look.floors, horiz ? hash2(c >> 1, r, seed) : hash2(c, r >> 1, seed))
+  g.fillRect(x, y, TILE, TILE)
+  // the weave: faint lines along the mat
+  g.fillStyle = rgba(look.floorCrack, 0.45)
+  if (horiz) for (let py = 3; py < 16; py += 4) g.fillRect(x, y + py, TILE, 1)
+  else for (let px = 3; px < 16; px += 4) g.fillRect(x + px, y, 1, TILE)
+  // borders on the mat's outer edges only
+  const top = horiz || (r & 1) === 0
+  const bottom = horiz || (r & 1) === 1
+  const left = !horiz || (c & 1) === 0
+  const right = !horiz || (c & 1) === 1
+  g.fillStyle = look.floorMortar
+  if (top) g.fillRect(x, y, TILE, 1)
+  if (bottom) g.fillRect(x, y + 15, TILE, 1)
+  if (left) g.fillRect(x, y, 1, TILE)
+  if (right) g.fillRect(x + 15, y, 1, TILE)
+  if (top) {
+    g.fillStyle = look.floorLight
+    g.fillRect(x + (left ? 1 : 0), y + 1, TILE - (left ? 1 : 0) - (right ? 1 : 0), 1)
+  }
+  if (rng() < 0.5) {
+    g.fillStyle = look.floorSpeck
+    g.fillRect(x + 2 + Math.floor(rng() * 12), y + 2 + Math.floor(rng() * 12), 1, 1)
+  }
+}
+
 /** A short random-walk crack starting somewhere inside the tile. */
 function crackWalk(g: CanvasRenderingContext2D, x: number, y: number, rng: Rng, color: string, len: number) {
   let px = 3 + Math.floor(rng() * 10)
@@ -561,22 +635,6 @@ function drawWallCap(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: num
       for (let i = 0; i < n; i++) g.fillRect(x + Math.floor(rng() * 16), y + Math.floor(rng() * 16), 1, 1)
       break
     }
-    case 'rough': {
-      // lumps of rock: light tops, dark undersides, no straight joints
-      for (let i = 0; i < 4; i++) {
-        const bx = Math.floor(rng() * 12)
-        const by = Math.floor(rng() * 12)
-        const bw = 3 + Math.floor(rng() * 4)
-        const bh = 2 + Math.floor(rng() * 3)
-        g.fillStyle = look.wallCapLight
-        g.fillRect(x + bx, y + by, bw, bh)
-        g.fillStyle = look.wallCapJoint
-        g.fillRect(x + bx, y + by + bh, bw, 1)
-      }
-      g.fillStyle = look.wallCapDark
-      for (let i = 0; i < 3; i++) g.fillRect(x + Math.floor(rng() * 16), y + Math.floor(rng() * 16), 1, 1)
-      break
-    }
     case 'canopy': {
       // leaves: two greens over the dark, with gaps
       for (let i = 0; i < 9; i++) {
@@ -622,9 +680,6 @@ function drawWallFace(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: nu
     case 'brick':
       drawBrickFace(g, x, y, r, seed, look)
       break
-    case 'rock':
-      drawRockFace(g, x, y, c, r, seed, look)
-      break
     case 'bamboo':
       drawBambooFace(g, x, y, c, seed, look)
       break
@@ -635,13 +690,19 @@ function drawWallFace(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: nu
       drawPanelFace(g, x, y, c, r, seed, look)
       break
     case 'ashlar':
-      drawAshlarFace(g, x, y, r, seed, look)
+      drawAshlarFace(g, x, y, c, r, seed, look)
       break
-    case 'chapel':
-      drawAshlarFace(g, x, y, r, seed, look)
-      if (c % 2 === 0 && tileAt(m, c, r - 2) === TileKind.Wall && tileAt(m, c - 1, r) === TileKind.Wall && tileAt(m, c + 1, r) === TileKind.Wall) {
-        drawWindow(g, x, y, c, r, seed, look)
-      }
+    case 'kitchen':
+      drawKitchenFace(g, x, y, c, r, seed, look)
+      break
+    case 'gears':
+      drawGearsFace(g, x, y, c, r, seed, look)
+      break
+    case 'shoji':
+      drawShojiFace(g, x, y, c, r, seed, look)
+      break
+    case 'club':
+      drawClubFace(g, x, y, c, r, seed, look)
       break
   }
 
@@ -672,29 +733,6 @@ function drawBrickFace(g: CanvasRenderingContext2D, x: number, y: number, r: num
       g.fillStyle = look.faceLight
       g.fillRect(x0, by, x1 - x0, 1)
     }
-  }
-}
-
-/** Irregular lumps of rock in a dark matrix. */
-function drawRockFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
-  const rng = tileRng(c, r, seed + 11)
-  g.fillStyle = look.faceMortar
-  g.fillRect(x, y + 2, TILE, 14)
-  for (let i = 0; i < 6; i++) {
-    const bw = 4 + Math.floor(rng() * 5)
-    const bh = 3 + Math.floor(rng() * 3)
-    const bx = x - 2 + Math.floor(rng() * 14)
-    const by = y + 2 + Math.floor(rng() * 11)
-    const x0 = Math.max(x, bx)
-    const x1 = Math.min(x + TILE, bx + bw)
-    const y1 = Math.min(y + TILE, by + bh)
-    if (x1 <= x0) continue
-    g.fillStyle = pick(look.faces, rng())
-    g.fillRect(x0, by, x1 - x0, y1 - by)
-    g.fillStyle = look.faceLight
-    g.fillRect(x0 + (bx < x ? 0 : 1), by, Math.max(1, x1 - x0 - 1), 1)
-    g.fillStyle = look.faceDark
-    g.fillRect(x0, y1 - 1, x1 - x0, 1)
   }
 }
 
@@ -771,8 +809,8 @@ function drawPanelFace(g: CanvasRenderingContext2D, x: number, y: number, c: num
   for (const [rx, ry] of [[2, 5], [12, 5], [2, 12], [12, 12]] as const) g.fillRect(x + rx, y + ry, 1, 1)
 }
 
-/** Two courses of big dressed blocks, 16 px wide, the lower course offset by half. */
-function drawAshlarFace(g: CanvasRenderingContext2D, x: number, y: number, r: number, seed: number, look: Look) {
+/** Two courses of big dressed blocks, 16 px wide, the lower course offset by half; moss creeps up from the ground where the look has an accent. */
+function drawAshlarFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
   g.fillStyle = look.faceMortar
   g.fillRect(x, y + 2, TILE, 14)
   for (let i = 0; i < 2; i++) {
@@ -790,27 +828,158 @@ function drawAshlarFace(g: CanvasRenderingContext2D, x: number, y: number, r: nu
       g.fillRect(x0, by, x1 - x0, 1)
     }
   }
-}
-
-/** A tall arched window with dark leaded panes, drawn over the face. */
-function drawWindow(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
-  const wx = x + 4
-  const wy = y + 3
-  g.fillStyle = WINDOW_FRAME
-  g.fillRect(wx, wy, 7, 11)
-  const rng = tileRng(c, r, seed + 17)
-  for (let j = 0; j < 2; j++) {
-    for (let i = 0; i < 2; i++) {
-      g.fillStyle = pick(WINDOW_PANES, rng())
-      g.fillRect(wx + 1 + i * 3, wy + 1 + j * 5, 2, 4)
+  if (look.accent && hash2(c, r, seed + 19) < 0.3) {
+    const rng = tileRng(c, r, seed + 19)
+    g.fillStyle = rgba(look.accent, 0.75)
+    const mx = Math.floor(rng() * 10)
+    for (let i = 0; i < 3; i++) {
+      const w = 2 + Math.floor(rng() * 4)
+      g.fillRect(x + mx + Math.floor(rng() * 4), y + 13 - i * 2 - Math.floor(rng() * 2), w, 2)
     }
   }
-  // round the arch by knocking the top corners back to stone and lighting the keystone
+}
+
+/** Two courses of glazed kitchen tiles over a stainless splash band; a copper pan on the odd tile. */
+function drawKitchenFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
+  g.fillStyle = look.faceMortar
+  g.fillRect(x, y + 2, TILE, 10)
+  for (let j = 0; j < 2; j++) {
+    const ty = y + 2 + j * 5
+    const off = j === 1 ? 4 : 0
+    for (let k = -1; k < 3; k++) {
+      const bx = x + off + k * 8
+      const x0 = Math.max(x, bx)
+      const x1 = Math.min(x + TILE, bx + 7)
+      if (x1 <= x0) continue
+      g.fillStyle = pick(look.faces, hash2(Math.floor(bx / 8), r * 2 + j, seed + 11))
+      g.fillRect(x0, ty, x1 - x0, 4)
+      g.fillStyle = look.faceLight
+      g.fillRect(x0, ty, x1 - x0, 1)
+    }
+  }
+  // the stainless band
+  g.fillStyle = look.faceDark
+  g.fillRect(x, y + 12, TILE, 4)
+  g.fillStyle = look.faceLight
+  g.fillRect(x, y + 12, TILE, 1)
+  // a hanging copper pan, one bright specular pixel
+  if (look.accent && hash2(c, r, seed + 29) < 0.18) {
+    const rng = tileRng(c, r, seed + 29)
+    const px = x + 3 + Math.floor(rng() * 5)
+    g.fillStyle = look.wallCapDark
+    g.fillRect(px + 2, y + 3, 1, 2)
+    g.fillStyle = look.accent
+    g.fillRect(px, y + 5, 6, 5)
+    g.fillRect(px + 1, y + 4, 4, 1)
+    g.fillStyle = look.wallCapDark
+    g.fillRect(px, y + 10, 6, 1)
+    if (look.accentLight) {
+      g.fillStyle = look.accentLight
+      g.fillRect(px + 1, y + 5, 1, 1)
+    }
+  }
+}
+
+/** The gear positions on a 'gears' wall; main.ts draws the gears per frame so they can turn. */
+export function gearAt(c: number, r: number, seed: number): boolean {
+  return hash2(c, r, seed + 31) < 0.22
+}
+
+/** Dark steel panels; the brass gear itself is drawn per frame (drawGear) so it can advance. */
+function drawGearsFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
   g.fillStyle = pick(look.faces, hash2(c, r, seed + 11))
-  g.fillRect(wx, wy, 1, 1)
-  g.fillRect(wx + 6, wy, 1, 1)
-  g.fillStyle = PAL.bone
-  g.fillRect(wx + 3, wy, 1, 1)
+  g.fillRect(x, y + 2, TILE, 14)
+  g.fillStyle = look.faceLight
+  g.fillRect(x, y + 2, TILE, 1)
+  g.fillStyle = look.faceMortar
+  g.fillRect(x, y + 9, TILE, 1)
+  g.fillRect(x + 15, y + 2, 1, 14)
+  g.fillStyle = look.faceDark
+  for (const [rx, ry] of [[2, 5], [12, 5], [2, 12], [12, 12]] as const) g.fillRect(x + rx, y + ry, 1, 1)
+  // the recess the gear sits in
+  if (gearAt(c, r, seed)) {
+    g.fillStyle = look.faceDark
+    g.fillRect(x + 2, y + 4, 12, 11)
+  }
+}
+
+/** A brass gear half-sunk in the wall at (x, y): disc, hub, and teeth at one of three steps. */
+export function drawGear(g: CanvasRenderingContext2D, x: number, y: number, step: number, look: Look) {
+  const cx = x + 8
+  const cy = y + 9
+  const brass = look.accent ?? '#c9962e'
+  const light = look.accentLight ?? '#f0d060'
+  g.fillStyle = brass
+  for (let dy = -4; dy <= 4; dy++) {
+    const hw = Math.round(Math.sqrt(Math.max(0, 20 - dy * dy)))
+    g.fillRect(cx - hw, cy + dy, hw * 2, 1)
+  }
+  // teeth: eight nubs, advanced a third of the pitch per step
+  const base = (step % 3) * ((Math.PI / 4) / 3)
+  for (let i = 0; i < 8; i++) {
+    const a = base + (i * Math.PI) / 4
+    const tx = cx + Math.round(Math.cos(a) * 5.5)
+    const ty = cy + Math.round(Math.sin(a) * 5.5)
+    g.fillStyle = brass
+    g.fillRect(tx - 1, ty - 1, 2, 2)
+  }
+  // shading: lit upper-left arc, dark underside, dark hub with a glint
+  g.fillStyle = light
+  g.fillRect(cx - 3, cy - 4, 3, 1)
+  g.fillRect(cx - 4, cy - 3, 1, 2)
+  g.fillStyle = look.faceDark
+  g.fillRect(cx - 2, cy + 4, 4, 1)
+  g.fillRect(cx - 1, cy - 1, 3, 3)
+  g.fillStyle = light
+  g.fillRect(cx - 1, cy - 1, 1, 1)
+}
+
+/** Shoji: a vermillion top beam, then two paper panes in a dark wood lattice over a low rail. */
+function drawShojiFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
+  g.fillStyle = look.accent ?? look.faceDark
+  g.fillRect(x, y + 2, TILE, 2)
+  g.fillStyle = look.faceDark
+  g.fillRect(x, y + 4, TILE, 1)
+  // the lattice and its two panes; a pane is sometimes lamplit from behind
+  g.fillStyle = look.faceMortar
+  g.fillRect(x, y + 5, TILE, 8)
+  for (let i = 0; i < 2; i++) {
+    const px = x + 1 + i * 8
+    const lit = hash2(c * 2 + i, r, seed + 37) < 0.12
+    g.fillStyle = lit && look.accentLight ? look.accentLight : pick(look.faces, hash2(c * 2 + i, r, seed + 13))
+    g.fillRect(px, y + 6, 6, 6)
+  }
+  // the rail
+  g.fillStyle = look.faceDark
+  g.fillRect(x, y + 13, TILE, 1)
+  g.fillStyle = look.faceMortar
+  g.fillRect(x, y + 14, TILE, 2)
+}
+
+/** The club wall: near-black panels, a neon trim line (pink and cyan by turns), a speaker here and there. */
+function drawClubFace(g: CanvasRenderingContext2D, x: number, y: number, c: number, r: number, seed: number, look: Look) {
+  g.fillStyle = pick(look.faces, hash2(c, r, seed + 11))
+  g.fillRect(x, y + 2, TILE, 14)
+  g.fillStyle = look.faceLight
+  g.fillRect(x, y + 2, TILE, 1)
+  const hue = ((c >> 2) & 1) === 0 ? (look.accent ?? '#ff2e8a') : (look.accentLight ?? '#00e5ff')
+  g.fillStyle = rgba(hue, 0.3)
+  g.fillRect(x, y + 6, TILE, 1)
+  g.fillRect(x, y + 8, TILE, 1)
+  g.fillStyle = hue
+  g.fillRect(x, y + 7, TILE, 1)
+  // a speaker box under the trim
+  if (hash2(c, r, seed + 41) < 0.18) {
+    const sx = x + 3 + Math.floor(hash2(c, r, seed + 43) * 5)
+    g.fillStyle = look.faceDark
+    g.fillRect(sx, y + 10, 9, 6)
+    g.fillStyle = look.faceLight
+    g.fillRect(sx, y + 10, 9, 1)
+    g.fillStyle = look.floorMortar
+    g.fillRect(sx + 3, y + 12, 3, 3)
+    g.fillStyle = look.faceLight
+    g.fillRect(sx + 4, y + 13, 1, 1)
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -821,6 +990,25 @@ function drawPit(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: number,
   const y = r * TILE
   g.fillStyle = look.pit
   g.fillRect(x, y, TILE, TILE)
+  // open sky: flat colour (the clouds drift under it per frame) and a ragged rock skirt
+  // hanging under the walkable edge instead of pit walls; no dark side edges down into daylight
+  if (look.sky) {
+    if (tileAt(m, c, r - 1) !== TileKind.Pit) {
+      const rng = tileRng(c, r, seed + 5)
+      g.fillStyle = look.pitWall
+      g.fillRect(x, y, TILE, 3)
+      g.fillStyle = look.pitWallDark
+      g.fillRect(x, y + 3, TILE, 2)
+      for (let px = 0; px < TILE; px += 2) {
+        const drop = Math.floor(rng() * 3)
+        if (drop > 0) {
+          g.fillStyle = look.pitWallDark
+          g.fillRect(x + px, y + 5, 2, drop)
+        }
+      }
+    }
+    return
+  }
   const rng = tileRng(c, r, seed + 5)
   g.fillStyle = look.pitWallDark
   for (let i = 0; i < 3; i++) g.fillRect(x + Math.floor(rng() * 16), y + 6 + Math.floor(rng() * 10), 1, 1)
@@ -842,7 +1030,7 @@ function drawPit(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: number,
 function drawPitRims(g: CanvasRenderingContext2D, m: ArenaMap, c: number, r: number, look: Look) {
   const x = c * TILE
   const y = r * TILE
-  g.fillStyle = look.floorLight
+  g.fillStyle = look.rim ?? look.floorLight
   if (tileAt(m, c, r - 1) === TileKind.Pit) g.fillRect(x, y, TILE, 1)
   if (tileAt(m, c, r + 1) === TileKind.Pit) g.fillRect(x, y + 15, TILE, 1)
   if (tileAt(m, c - 1, r) === TileKind.Pit) g.fillRect(x, y, 1, TILE)

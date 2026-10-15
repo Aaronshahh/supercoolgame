@@ -100,6 +100,92 @@ export const TORCH: string[][] = [
   ],
 ]
 
+/** Paper lantern on a hook, 7×11 like the torch; the hot spot wanders across the three frames. */
+export const LANTERN: string[][] = [
+  [
+    '...m...',
+    '..odo..',
+    '.obbbo.',
+    'obyyybo',
+    'obyOybo',
+    'obyyybo',
+    '.obbbo.',
+    '..odo..',
+    '...R...',
+    '...R...',
+    '.......',
+  ],
+  [
+    '...m...',
+    '..odo..',
+    '.obbbo.',
+    'obOyybo',
+    'obyyybo',
+    'obyyybo',
+    '.obbbo.',
+    '..odo..',
+    '...R...',
+    '...R...',
+    '.......',
+  ],
+  [
+    '...m...',
+    '..odo..',
+    '.obbbo.',
+    'obyyybo',
+    'obyyybo',
+    'obyyObo',
+    '.obbbo.',
+    '..odo..',
+    '...R...',
+    '...R...',
+    '.......',
+  ],
+]
+
+/** Wall lamp, 7×11 like the torch: a small flame in a metal cup on a backplate. */
+export const LAMP: string[][] = [
+  [
+    '...y...',
+    '..yyO..',
+    '..yOO..',
+    '..ORO..',
+    '.MmmmM.',
+    '..mmm..',
+    '...m...',
+    '...m...',
+    '..mMm..',
+    '..mmm..',
+    '.......',
+  ],
+  [
+    '..y....',
+    '..yyO..',
+    '.yyOO..',
+    '..ORO..',
+    '.MmmmM.',
+    '..mmm..',
+    '...m...',
+    '...m...',
+    '..mMm..',
+    '..mmm..',
+    '.......',
+  ],
+  [
+    '....y..',
+    '..yyO..',
+    '..yOOy.',
+    '..ORO..',
+    '.MmmmM.',
+    '..mmm..',
+    '...m...',
+    '...m...',
+    '..mMm..',
+    '..mmm..',
+    '.......',
+  ],
+]
+
 export const SHADOW_DUDE: string[] = [
   '..ssssss..',
   '.ssssssss.',

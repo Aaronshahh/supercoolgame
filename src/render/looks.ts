@@ -15,19 +15,22 @@ export type FloorStyle =
   | 'plates' // riveted iron plates
   | 'cobbles' // 4×4 rounded cobbles per tile
   | 'checker' // one-tile checkerboard
+  | 'planks' // wood planks in 4 px courses; the specks are brass rivets
+  | 'tatami' // 2×1-tile mats with dark borders, orientation alternating per 2×2 block
 
 export type WallStyle =
   | 'brick' // three courses of 8×4 bricks (the original)
-  | 'rock' // irregular rock lumps
   | 'bamboo' // vertical stalks with nodes
   | 'ice' // big translucent ice blocks with frost joints and a highlight streak
   | 'panel' // flat metal panels with a seam and rivets
-  | 'ashlar' // two courses of big dressed blocks
-  | 'chapel' // ashlar with tall dark windows in the outer walls
+  | 'ashlar' // two courses of big dressed blocks; `accent` adds creeping moss
+  | 'kitchen' // glazed wall tiles over a stainless band, hanging copper pans in `accent`
+  | 'gears' // dark steel panels; brass gears (drawn per frame, on the spike beat) half-sunk in them
+  | 'shoji' // paper panes in a wood lattice, the odd pane backlit, a vermillion top beam
+  | 'club' // near-black panels with a neon trim line and speaker boxes
 
 export type CapStyle =
   | 'blocks' // running-bond blocks seen from above (the original)
-  | 'rough' // flecked rock, no joints
   | 'canopy' // leaves
   | 'snow' // a smooth white mound with a bright rim
 
@@ -44,8 +47,12 @@ export interface Look {
   floorSpeck: string
   /** Earth only: colour of the moss patches, if any. */
   moss?: string
-  /** Slabs only: colour of the odd glowing speck (the Forge's embers). */
+  /** Slabs only: colour of the odd glowing speck (embers in a crack, gold glints in a ruin). */
   ember?: string
+  /** Wall decor colours: copper pans, brass gears, vermillion beams, the pink half of the neon. */
+  accent?: string
+  /** Its partner: pan speculars, brass highlights, a backlit pane, the cyan half of the neon. */
+  accentLight?: string
   wallCap: string
   wallCapLight: string
   wallCapEdge: string
@@ -59,6 +66,18 @@ export interface Look {
   pit: string
   pitWall: string
   pitWallDark: string
+  /** Pits are open daytime sky: a rock skirt instead of pit walls, clouds drifting below per frame. */
+  sky?: boolean
+  /** Colour of the 1 px rim where floor meets pit (default floorLight; dark against a bright sky). */
+  rim?: string
+  /** Base lightmap darkness (default 0.4); a room open to daylight sits much lower. */
+  ambientLight?: number
+  /** What hangs at the torch anchors (default the torch). */
+  fixture?: 'lantern' | 'lamp'
+  /** Checker only: the dance floor's hue set, cycled on the music's beat (hue only, value-locked). */
+  floorCycle?: string[]
+  /** Chandeliers are mirror balls: cool light, facet glints, drifting spot ellipses on the floor. */
+  mirror?: boolean
   /** RGB of the cast shadows (walls onto the floor, ground contact); purple-black everywhere but the snow. */
   shade: [number, number, number]
   /** Loose debris decals on the floor, as a fraction of the default density. */
@@ -128,35 +147,45 @@ const STONE: Look = {
 export const LOOKS: Record<string, Look> = {
   stone: STONE,
 
-  /** The Pits: a cave. Dirt floor, rock walls, no straight line anywhere. */
-  cavern: {
+  /**
+   * The Spires: a shattered ruin floating in daylight. Pale dressed stone with moss and the odd
+   * gold glint; the pits are open sky with a cloud sea drifting below (drawn per frame), so every
+   * walkable edge gets a dark rim — bright sky against pale stone goes mushy without one.
+   */
+  sky: {
     ...STONE,
-    key: 'cavern',
-    floor: 'earth',
-    wall: 'rock',
-    cap: 'rough',
-    floors: ['#3a3331', '#403836', '#36302e', '#3d3533'],
-    floorLight: '#4a413e',
-    floorMortar: '#241f1e',
-    floorCrack: '#2a2423',
-    floorSpeck: '#55493f',
-    wallCap: '#2b2522',
-    wallCapLight: '#3a322e',
-    wallCapEdge: '#5a4e46',
-    wallCapJoint: '#1e1917',
-    wallCapDark: '#15110f',
-    faces: ['#6b5a4e', '#75635a', '#5f5047', '#7a675c'],
-    faceLight: '#8c7a6c',
-    faceMortar: '#2e2520',
-    faceDark: '#3e322c',
-    pitWall: '#4a3f3a',
-    pitWallDark: '#2d2624',
-    // a cave: water drips off the unseen ceiling, dust hangs in the air
+    key: 'sky',
+    wall: 'ashlar',
+    floors: ['#b4b0a2', '#bcb8aa', '#aeaa9c', '#b8b4a6'],
+    floorLight: '#dad6c8',
+    floorMortar: '#86826f',
+    floorCrack: '#96927f',
+    floorSpeck: '#ccc8ba',
+    ember: '#e8c04a',
+    wallCap: '#716d60',
+    wallCapLight: '#847f70',
+    wallCapEdge: '#aaa695',
+    wallCapJoint: '#565244',
+    wallCapDark: '#3c3930',
+    faces: ['#cfccbf', '#d8d4c6', '#c6c2b4', '#dedacc'],
+    faceLight: '#f0ecde',
+    faceMortar: '#8a8678',
+    faceDark: '#a09c8e',
+    accent: '#58c0a8',
+    pit: '#7db8e8',
+    pitWall: '#8a8172',
+    pitWallDark: '#675f50',
+    sky: true,
+    rim: '#4a4858',
+    ambientLight: 0.12,
+    shade: [40, 55, 90],
+    debris: 0.3,
+    // open air: bright motes on the wind, a leaf of moss off the stonework now and then
     ambient: [
-      { kind: 'drip', rate: 1.2, where: 'floor', colors: ['#7fa6bd'] },
-      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#6a5d55'] },
+      { kind: 'mote', rate: 1.6, where: 'anywhere', colors: ['#ffffff', '#dce8f4'] },
+      { kind: 'leaf', rate: 0.4, where: 'wall', colors: ['#58c0a8', '#8aa89a'] },
     ],
-    dust: '#6a5a4c',
+    dust: '#aaa695',
   },
 
   /** The Greenhouse: a bamboo grove. Earth and moss underfoot, stalks for walls, leaves on top. */
@@ -190,32 +219,40 @@ export const LOOKS: Record<string, Look> = {
     dust: '#6a5a42',
   },
 
-  /** The Forge: charcoal slabs with embers in the cracks, blackened red brick. */
-  forge: {
+  /**
+   * The Kitchen: cream-and-terracotta checker, glazed wall tiles over a stainless band, hanging
+   * copper. The room stays cool and clean so the warm hazards pop — the burners (vents) and the
+   * barrels keep their own colours, as every hazard does in every room.
+   */
+  kitchen: {
     ...STONE,
-    key: 'forge',
-    floors: ['#2e2628', '#33292b', '#2a2325', '#302729'],
-    floorLight: '#3e3335',
-    floorMortar: '#1a1416',
-    floorCrack: '#201a1b',
-    floorSpeck: '#5a3a30',
-    ember: PAL.flameO,
-    wallCap: '#241c1c',
-    wallCapLight: '#352828',
-    wallCapEdge: '#6a4a3a',
-    wallCapJoint: '#1a1313',
-    wallCapDark: '#120d0d',
-    faces: ['#5a3028', '#64362c', '#4e2a22', '#6c3a2e'],
-    faceLight: '#7a4838',
-    faceMortar: '#241412',
-    faceDark: '#1a0e0c',
-    debris: 0.6,
-    // a forge: embers lift out of the cracks in the floor, a little smoke hangs by the walls
+    key: 'kitchen',
+    floor: 'checker',
+    wall: 'kitchen',
+    floors: ['#a2583a', '#d8ccb2'],
+    floorLight: '#eee2c8',
+    floorMortar: '#774428',
+    floorCrack: '#8d5134',
+    floorSpeck: '#c2b599',
+    wallCap: '#473830',
+    wallCapLight: '#594840',
+    wallCapEdge: '#8a7258',
+    wallCapJoint: '#332822',
+    wallCapDark: '#221a16',
+    faces: ['#d8e4e0', '#cedad6'],
+    faceLight: '#f0faf4',
+    faceMortar: '#a4b0ac',
+    faceDark: '#78898c',
+    accent: '#c87f3f',
+    accentLight: '#ffd9a0',
+    debris: 0.15,
+    // a working kitchen: steam off the counters, warm flour dust in the light
     ambient: [
-      { kind: 'ember', rate: 4, where: 'floor', colors: [PAL.flameO, PAL.flameR] },
-      { kind: 'smoke', rate: 0.35, where: 'wall', colors: ['#1a1416'] },
+      { kind: 'wisp', rate: 1.4, where: 'wall', colors: ['#e4efec'] },
+      { kind: 'mote', rate: 1.2, where: 'floor', colors: ['#eee2c8'] },
     ],
-    dust: '#4a3a38',
+    dust: '#c2b599',
+    fixture: 'lamp',
   },
 
   /** The Laboratory: clean two-tone tiles, riveted panels, nothing on the floor. */
@@ -244,33 +281,40 @@ export const LOOKS: Record<string, Look> = {
     dust: '#6c7288',
   },
 
-  /** The Armoury: iron plates underfoot, cold grey dressed stone. */
-  armoury: {
+  /**
+   * The Clockwork: a clock tower. Cold steel-blue walls so the brass gears read as metal (warm on
+   * warm is mud), dark planks with brass rivets underfoot; the gears advance on the spike beat, so
+   * the room itself telegraphs the hazard's rhythm.
+   */
+  clockwork: {
     ...STONE,
-    key: 'armoury',
-    floor: 'plates',
-    wall: 'ashlar',
-    floors: ['#3a3a42', '#3e3e46', '#36363e', '#3c3c44'],
-    floorLight: '#55555f',
-    floorMortar: '#1e1e24',
-    floorCrack: '#2a2a30',
-    floorSpeck: '#6a6a76',
-    wallCap: '#2a2a30',
-    wallCapLight: '#3a3a42',
-    wallCapEdge: '#5e5e6a',
-    wallCapJoint: '#1e1e24',
-    wallCapDark: '#141418',
-    faces: ['#6a6672', '#726e7a', '#625e6a', '#7a7682'],
-    faceLight: '#8e8a98',
-    faceMortar: '#2e2c34',
-    faceDark: '#3e3a46',
-    debris: 0.8,
-    // an armoury: grey dust, grit off the old stone
+    key: 'clockwork',
+    floor: 'planks',
+    wall: 'gears',
+    floors: ['#56402c', '#5e4631', '#503c29', '#5a432e'],
+    floorLight: '#7a5c3e',
+    floorMortar: '#30231a',
+    floorCrack: '#413020',
+    floorSpeck: '#c9962e',
+    wallCap: '#232a42',
+    wallCapLight: '#303a56',
+    wallCapEdge: '#4e5c80',
+    wallCapJoint: '#181e30',
+    wallCapDark: '#0f1420',
+    faces: ['#3c4a6e', '#425078'],
+    faceLight: '#5c6c96',
+    faceMortar: '#242c48',
+    faceDark: '#1a2238',
+    accent: '#c9962e',
+    accentLight: '#f0d060',
+    debris: 0.4,
+    // a tower full of machinery: dust in the works, grit shaken off on the tick
     ambient: [
-      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#8e8a98'] },
-      { kind: 'grit', rate: 0.3, where: 'wall', colors: ['#5e5e6a'] },
+      { kind: 'mote', rate: 1.4, where: 'floor', colors: ['#8a94b4'] },
+      { kind: 'grit', rate: 0.3, where: 'wall', colors: ['#4e5c80', '#8a6420'] },
     ],
-    dust: '#6a6a76',
+    dust: '#6a5f52',
+    fixture: 'lamp',
   },
 
   /** The Icebox: a frozen waste. Snow for floor, ice blocks for walls, dark water in the holes. */
@@ -305,62 +349,75 @@ export const LOOKS: Record<string, Look> = {
     prints: '#8aa6ba',
   },
 
-  /** The Gatehouse: cobbles and warm sandstone. */
-  keep: {
+  /**
+   * The Shrine: wood and paper. Tatami underfoot (the alternating mat layout is the read, not the
+   * weave), shoji panels with the odd pane lamplit from behind, vermillion rationed to the beams,
+   * paper lanterns at the torch anchors.
+   */
+  shrine: {
     ...STONE,
-    key: 'keep',
-    floor: 'cobbles',
-    wall: 'ashlar',
-    floors: ['#5a4e42', '#625548', '#52473c', '#5e5146'],
-    floorLight: '#766858',
-    floorMortar: '#2e2720',
-    floorCrack: '#38302a',
-    floorSpeck: '#80705e',
-    wallCap: '#3a3128',
-    wallCapLight: '#4c4034',
-    wallCapEdge: '#7a6a52',
-    wallCapJoint: '#2a231c',
-    wallCapDark: '#1a1510',
-    faces: ['#a08a62', '#aa9468', '#96805a', '#b09c70'],
-    faceLight: '#c8b48a',
-    faceMortar: '#4a3c2a',
-    faceDark: '#6a5a40',
-    debris: 0.6,
-    // a keep: warm dust, sand trickling off the sandstone
+    key: 'shrine',
+    floor: 'tatami',
+    wall: 'shoji',
+    floors: ['#b0a468', '#a4945a', '#b8ac70', '#aa9c60'],
+    floorLight: '#ccc080',
+    floorMortar: '#584c2c',
+    floorCrack: '#8e8050',
+    floorSpeck: '#d4c888',
+    wallCap: '#2e2218',
+    wallCapLight: '#3e2e20',
+    wallCapEdge: '#6b4a28',
+    wallCapJoint: '#20170f',
+    wallCapDark: '#140e08',
+    faces: ['#e8dfc4', '#efe6cc', '#e2d9be'],
+    faceLight: '#f8f0da',
+    faceMortar: '#4a3220',
+    faceDark: '#352314',
+    accent: '#c43226',
+    accentLight: '#ffe8b0',
+    debris: 0.25,
+    // a shrine: incense dust in the lantern light, a petal across the room now and then
     ambient: [
-      { kind: 'mote', rate: 1.5, where: 'floor', colors: ['#c8b48a'] },
-      { kind: 'grit', rate: 0.5, where: 'wall', colors: ['#a08a62', '#766858'] },
+      { kind: 'mote', rate: 1.8, where: 'floor', colors: ['#f2e9d0', '#d4c888'] },
+      { kind: 'leaf', rate: 0.5, where: 'wall', colors: ['#e8a7b4', '#d88a9a'] },
     ],
-    dust: '#80705e',
+    dust: '#a89858',
+    fixture: 'lantern',
   },
 
-  /** The Chapel: a checkered floor, pale limestone, dark windows. Lit by its chandeliers alone. */
-  chapel: {
+  /**
+   * The Discotheque: a dark club lit by its mirror balls alone (the chandelier light-share system,
+   * unchanged). The checker dance floor sits in a narrow near-black value band and cycles hue only,
+   * on the music's beat; the walls stay dark so the floor and the neon carry all the colour, and
+   * nothing in the room may reach the players' brightness.
+   */
+  disco: {
     ...STONE,
-    key: 'chapel',
+    key: 'disco',
     floor: 'checker',
-    wall: 'chapel',
-    floors: ['#3a3240', '#574e58'],
-    floorLight: '#6a6070',
-    floorMortar: '#221c26',
-    floorCrack: '#2a222c',
-    floorSpeck: '#605666',
-    wallCap: '#2a2530',
-    wallCapLight: '#3a3442',
-    wallCapEdge: '#625a6c',
-    wallCapJoint: '#1e1a24',
-    wallCapDark: '#15121a',
-    faces: ['#7a7378', '#847d82', '#706a6f', '#8a8388'],
-    faceLight: '#a39ca1',
-    faceMortar: '#3a343a',
-    faceDark: '#4a4248',
-    debris: 0.4,
-    // a chapel: dust turning in the candlelight (the chandeliers add their own candle smoke)
-    ambient: [{ kind: 'mote', rate: 3, where: 'floor', colors: [PAL.cream, PAL.boneDark] }],
-    dust: '#605666',
+    wall: 'club',
+    floors: ['#17121f', '#262033'],
+    floorLight: '#3a2f4c',
+    floorMortar: '#0d0a14',
+    floorCrack: '#2e2540',
+    floorSpeck: '#453a58',
+    floorCycle: ['#ff3355', '#ffaa00', '#33ff77', '#3388ff'],
+    wallCap: '#141020',
+    wallCapLight: '#1e1830',
+    wallCapEdge: '#352a48',
+    wallCapJoint: '#0b0814',
+    wallCapDark: '#060410',
+    faces: ['#1c1626', '#211a2c'],
+    faceLight: '#3a2e4e',
+    faceMortar: '#0d0a14',
+    faceDark: '#070510',
+    accent: '#ff2e8a',
+    accentLight: '#00e5ff',
+    mirror: true,
+    shade: [4, 3, 8],
+    debris: 0,
+    // a club: haze in the beams
+    ambient: [{ kind: 'mote', rate: 2, where: 'floor', colors: ['#5a4a7a', '#8a6aa8'] }],
+    dust: '#453a58',
   },
 }
-
-/** Stained glass for the chapel windows: frame, then the pane colours (deep, so they read as unlit). */
-export const WINDOW_FRAME = PAL.boneDark
-export const WINDOW_PANES = ['#1c2a55', '#4a1c3a', '#1c3a3a']

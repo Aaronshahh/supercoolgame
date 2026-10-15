@@ -15,7 +15,9 @@
  * Every room follows docs/notes-arena-design.md: one hazard family (the theme) plus one terrain
  * motif, left-right mirrored, six spawns in mirrored pairs, three power-up points (flanks plus one
  * in the risky middle), the centre a hazard or a block rather than a prize, at most two movers, no
- * belts, no carts. The Chapel is the one dark room, by Aaron's call: its chandeliers are the lights.
+ * belts, no carts. The Discotheque is the one dark room, by Aaron's call: its mirror balls are the
+ * lights. Nine rooms, nine material worlds (docs/notes-environment-design.md): stone, sky, grove,
+ * kitchen, laboratory, clockwork, pond, shrine, discotheque — room keys never change, titles do.
  *
  * `npm run check-arenas` validates every room here (src/demo/checkArenas.ts); `?arena=<key>` plays it.
  *
@@ -55,14 +57,14 @@ interface RoomSpec {
 /** Which look (src/render/looks.ts) each theme is drawn in. */
 const LOOK_FOR_THEME: Record<string, string> = {
   blocks: 'stone',
-  pits: 'cavern',
+  pits: 'sky',
   grass: 'bamboo',
-  fire: 'forge',
+  fire: 'kitchen',
   portals: 'lab',
-  spikes: 'armoury',
+  spikes: 'clockwork',
   ice: 'frost',
-  gates: 'keep',
-  chandeliers: 'chapel',
+  gates: 'shrine',
+  chandeliers: 'disco',
 }
 
 /** Wraps the interior rows in the wall ring and the torch row. */
@@ -115,16 +117,17 @@ const CELLAR = room({
 })
 
 /**
- * A cave, wide and low (38 × 15), its corners eaten away. A chasm splits it into a north and a
- * south half. Crossings: the two ends, a stone bridge in the middle, two crumbling bridges that go
- * one-way after their first use, and two short lifts. Skill: throws cross the pit where bodies
- * cannot; a boomerang hovering over the bridge denies it; lift timing.
+ * A shattered ruin floating in daylight, wide and low (38 × 15), its corners long since fallen
+ * away. Open sky splits it into a north and a south island, with a cloud sea drifting far below.
+ * Crossings: the two ends, a stone bridge in the middle, two crumbling spans that go one-way after
+ * their first use, and two drifting platforms. Skill: throws cross the sky where bodies cannot; a
+ * boomerang hovering over the bridge denies it; platform timing. (The room key stays `pits`.)
  */
 const PITS = room({
   key: 'pits',
-  title: 'The Pits',
+  title: 'The Spires',
   theme: 'pits',
-  blurb: 'throws over the chasm, hovering to deny the bridge, lift timing',
+  blurb: 'throws over the open sky, hovering to deny the bridge, platform timing',
   torches: [6, 14, 23, 31],
   rows: [
     '####.............####.............####',
@@ -185,15 +188,15 @@ const GREENHOUSE = room({
 })
 
 /**
- * The furnace hall: an octagon (32 × 18) whose cut corners push the fight toward the vents. Vent
- * bars in two phases guard the approaches to a furnace block in the middle; barrels sit against
- * it. A vent that is ON blocks bodies and lights any boomerang that passes, which then lights
- * barrels. Skill: rhythm (cross on OFF, throw across on ON), lighting your boomerang on purpose,
- * barrel chains at range.
+ * A giant kitchen: an octagon (32 × 18) whose cut corners push the fight toward the burners.
+ * Burner bars in two phases guard the approaches to the great stove block in the middle; powder
+ * kegs sit against it like sacks of flour by an oven. A burner that is ON blocks bodies and lights
+ * any boomerang that passes, which then lights barrels. Skill: rhythm (cross on OFF, throw across
+ * on ON), lighting your boomerang on purpose, barrel chains at range. (The room key stays `forge`.)
  */
 const FORGE = room({
   key: 'forge',
-  title: 'The Forge',
+  title: 'The Kitchen',
   theme: 'fire',
   blurb: 'throw through the flames to light the boomerang, set the barrels off from range',
   torches: [6, 13, 18, 25],
@@ -261,14 +264,15 @@ const LAB = room({
 })
 
 /**
- * A long hall (36 × 15) with pilasters on its walls. Two spike bands in opposite phase separate
- * the north and south strips from a central bowl between two weapon racks. A band that is UP is a
- * wall to bodies and open to throws. Skill: timing crossings, throwing across a band you cannot
- * cross, banks off the racks.
+ * The inside of a clock tower: a long hall (36 × 15) with machinery housings on its walls, brass
+ * gears turning in them on the same beat the spikes keep. Two spike bands in opposite phase
+ * separate the north and south strips from a central bowl between two gear housings. A band that
+ * is UP is a wall to bodies and open to throws. Skill: timing crossings, throwing across a band
+ * you cannot cross, banks off the housings. (The room key stays `armoury`.)
  */
 const ARMOURY = room({
   key: 'armoury',
-  title: 'The Armoury',
+  title: 'The Clockwork',
   theme: 'spikes',
   blurb: 'cross on the beat, throw across the spikes you cannot cross',
   torches: [4, 13, 22, 31],
@@ -327,17 +331,18 @@ const ICEBOX = room({
 })
 
 /**
- * Two towers and the keep between them (34 × 18). A wall-walk runs across the top of all three; the
- * keep's walls have two gated doorways a side, top gates and bottom gates in opposite phase, so one
- * row is always open; a closed gate bounces boomerangs. A pendulum sweeps the wall-walk over the
- * keep. Skill: throws through a gate that is about to close, closed gates as bank walls, the
- * pendulum walk as a dash-timed shortcut.
+ * A shrine: two outer halls and the inner sanctum between them (34 × 18). A walkway runs across
+ * the top of all three; the sanctum's walls have two sliding shoji doors a side, top doors and
+ * bottom doors in opposite phase, so one row is always open; a closed door bounces boomerangs. A
+ * great censer swings across the walkway over the sanctum. Skill: throws through a door that is
+ * about to close, closed doors as bank walls, the censer walk as a dash-timed shortcut. (The room
+ * key stays `gatehouse`.)
  */
 const GATEHOUSE = room({
   key: 'gatehouse',
-  title: 'The Gatehouse',
+  title: 'The Shrine',
   theme: 'gates',
-  blurb: 'throw through closing gates, bank off closed ones, dash the pendulum walk',
+  blurb: 'throw through sliding doors, bank off closed ones, dash the censer walk',
   torches: [2, 8, 25, 31],
   rows: [
     '..................................',
@@ -369,18 +374,20 @@ const GATEHOUSE = room({
 })
 
 /**
- * A chapel in the shape of a cross (38 × 19): a narrow apse with the altar at the top, the nave
- * down the middle, a wide transept across it, pews of crates. No torches: the four chandeliers are
- * the lights, and every one that is dropped leaves the room darker (Aaron, 2026-10-09). The pair
- * over the transept and the pair over the pews are staggered a column apart, so no column of the
- * nave is safe and no two chains overlap on screen. Skill: dropping a chandelier on someone with a
- * thrown boomerang, baiting people under one, choosing between light and a kill.
+ * A nightclub in the shape of a cross (38 × 19, Aaron's "disco ball room"): the DJ stand at the
+ * top, the dance floor down the middle, a wide lounge across it, crates stacked like road cases.
+ * No torches: the four mirror balls are the lights, and every one that is dropped leaves the club
+ * darker (Aaron, 2026-10-09). The pair over the lounge and the pair over the cases are staggered a
+ * column apart, so no column of the dance floor is safe and no two chains overlap on screen. The
+ * floor pulses through its hues on the music's beat — hue only, never value. Skill: dropping a
+ * mirror ball on someone with a thrown boomerang, baiting people under one, choosing between light
+ * and a kill. (The room key stays `chapel`.)
  */
 const CHAPEL = room({
   key: 'chapel',
-  title: 'The Chapel',
+  title: 'The Discotheque',
   theme: 'chandeliers',
-  blurb: 'drop the chandeliers on people; every one you drop makes it darker',
+  blurb: 'drop the mirror balls on people; every one you drop makes it darker',
   torches: [],
   lightSource: 'chandeliers',
   rows: [

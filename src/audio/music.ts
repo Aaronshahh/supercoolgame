@@ -8,6 +8,8 @@ interface Playing {
   track: MusicTrack
   source: AudioBufferSourceNode
   gain: GainNode
+  /** AudioContext time the source started, for beatPhase. */
+  startAt: number
 }
 
 let playing: Playing | null = null
@@ -76,7 +78,7 @@ export const music = {
         source.connect(gain).connect(engine.music)
         source.start(at)
         if (playing) fadeOut(playing, seconds)
-        playing = { track, source, gain }
+        playing = { track, source, gain, startAt: at }
         engine.setRoomTone(track.reverb[0], track.reverb[1])
       }).catch(error => {
         if (id === request) wanted = null // a later request can retry
@@ -112,4 +114,16 @@ export const music = {
   },
 
   current(): MusicTrack | null { return playing?.track ?? null },
+
+  /**
+   * Beats elapsed since the playing track started, for visuals synced to the music (the dance
+   * floor). Null when nothing plays yet; drifts a hair during the deathSlow dip, which no one
+   * will see. The loop length is a whole number of bars, so phase survives the loop join.
+   */
+  beatPhase(): number | null {
+    if (!playing || !engine.running) return null
+    const elapsed = engine.now() - playing.startAt
+    if (elapsed < 0) return null
+    return elapsed * (playing.track.bpm / 60)
+  },
 }
