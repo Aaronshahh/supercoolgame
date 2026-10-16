@@ -121,10 +121,11 @@ host leaving destroys the peer, so guests' channels close and they see THE HOST 
 ### 4.1 The rule
 
 Every client runs the whole simulation. Tick T may be stepped only from a **bundle**: the inputs of
-every live human for T, assembled by the host, plus any host commands. A client that is simulating
-tick T submits its input for tick **T + delay**, so by the time T + delay is due the host has had a
-round trip to collect it. The first `delay` ticks are primed with neutral inputs (everyone stands
-still through part of the intro, which nobody can see).
+every live human for T, assembled by the host, plus any host commands. Inputs ride the wall clock:
+once per tick of real time a client submits its input for the next unsent tick, which runs at least
+`delay` ticks ahead of the tick it is stepping, so by the time a tick is due the host has had a
+round trip to collect everyone's input for it. The first `delay` ticks are primed with neutral
+inputs (everyone stands still through part of the intro, which nobody can see).
 
 The host accepts inputs into a per-tick pending set and, in tick order, completes every bundle for
 which all live humans have reported, broadcasting each as it completes and keeping a copy for
@@ -132,14 +133,24 @@ itself. A guest queues bundles as they arrive. Each step, a client `take`s the b
 tick; if it is not there it **waits**: nothing is predicted, nothing is rolled back. The HUD says
 WAITING FOR *name* (the host knows whom; a guest only knows it is the host) after a dozen frames.
 
-### 4.2 One tick per step, always
+### 4.2 Inputs on the clock, steps on arrival
 
-The fixed-step loop's real-time accumulator decides how many ticks are due this frame; `netStep`
-takes exactly one bundle per due tick or stalls. An earlier version stepped extra ticks whenever
-bundles were queued, to "catch up". It fed itself: every tick stepped also submits an input, so the
-queue never drained, and the two-browser test (§8) ran at 178 ticks a second with every hash
-agreeing. The accumulator keeps at most one due tick while stalled, ready for its missing packet;
-extra waiting time is discarded. Network events and drawing use the same accumulator and clock.
+The fixed-step loop's real-time accumulator decides how many ticks are due this frame; each due
+tick first pumps one local input (`netPump`), then steps one bundle if it is here (`netStep`), else
+the sim waits while the inputs keep flowing. The two must stay decoupled. An earlier version
+submitted the next input only *after* stepping a tick, which chained everyone's inputs to bundle
+arrivals: every bundle needs a round trip through the host, so the whole match converged on `delay`
+ticks per round trip — 28 ticks a second at a 100 ms RTT in the §8 test, slow motion for everyone,
+with every hash agreeing. (Its predecessor had the opposite bug: stepping every queued bundle to
+"catch up" fed itself through that same coupling and ran at 178 ticks a second.)
+
+The input frontier is allowed `delay + 12` ticks past the last stepped tick, enough to keep the
+host supplied through a round trip of ~260 ms at the default delay before the pump pauses too. When
+stepped ticks trail the inputs already sent — a stall's backlog, or a link slower than the delay
+hides — the loop drains one extra bundle per frame, outside the accumulator's budget, until the gap
+is back to `delay`. The drain cannot run away: only the clock-paced pump creates inputs, so at most
+2× speed, and only while a backlog exists. Network events and drawing use the same accumulator and
+clock.
 
 ### 4.3 What an input is
 
@@ -152,9 +163,11 @@ tick per player, two kilobytes a second each way at 60 Hz, before WebRTC's own f
 
 With the host relaying, a guest's input needs guest → host → guest before it is in a bundle the
 guest can use, about one round trip to the host; the host's own input needs one trip out. Delay *d*
-hides a round trip of roughly (d − 1) × 16.7 ms before stalls begin:
+hides a round trip of roughly (d − 1) × 16.7 ms completely; a longer round trip no longer slows the
+match (§4.2) — the pace stays 60 ticks a second and the extra latency shows as inputs landing late,
+your own included, by about RTT − d × 16.7 ms:
 
-| Delay | Hides up to | Feels like |
+| Delay | Fully hides | Feels like |
 |---|---|---|
 | 2 | ~17 ms | same machine / LAN |
 | 3 | ~33 ms | same city |
@@ -162,8 +175,10 @@ hides a round trip of roughly (d − 1) × 16.7 ms before stalls begin:
 | 5–6 | ~67–83 ms | cross-country |
 | 8 | ~117 ms | intercontinental; past this, rollback (§9) |
 
-For comparison, the press-to-release of a throw is already 24 ticks of animation and the melee
-windup several, so four ticks of input delay sits under the game's own commitment times.
+Raising the delay past the link's round trip buys nothing; below it, the match is just as fast and
+everyone's inputs land equally late, so the fixed default stays sensible on a slow link. For
+comparison, the press-to-release of a throw is already 24 ticks of animation and the melee windup
+several, so four ticks of input delay sits under the game's own commitment times.
 
 ### 4.5 Commands
 
@@ -319,7 +334,10 @@ wild (§10 #2).
   both consoles to `shots/net-*.log`, compares every `NET t<tick> hash <h>` line and checks the
   pace. Passes when every compared hash agrees and the match ran at 45–75 ticks a second. Result,
   2026-10-10: 30 of 30 hashes agree, 900 ticks in 15.0 s (60 ticks/s). Needs the broker reachable;
-  the data channel itself is on the loopback.
+  the data channel itself is on the loopback. `lag=<ms>` in the host query holds every outgoing
+  message that long on both sides (`?lag=`, peer.ts), faking a 2×lag round trip. Result, 2026-10-15:
+  at lag 50 (100 ms RTT) 27 of 27 hashes agree at 54 ticks/s — this machine's no-lag pace — where
+  the arrival-chained pipeline (§4.2) managed 28; at lag 80 with delay 2, 52 of 52 at 53 ticks/s.
 - **Live stills of the shell.** `node scripts/live-shot.mjs <name> [query] [seconds] [keys…]` opens
   the page, presses the keys, waits, and screenshots: the menus, a lobby
   (`test=host&code=SHOT1&bots=1`), a failed join (`room=ZZZZ2`).
@@ -339,8 +357,8 @@ wild (§10 #2).
 
 ## 9. The rollback upgrade path
 
-Lockstep stalls when the delay is too small for the link and feels laggy when it is large enough.
-GGPO-style rollback removes the choice: run ahead with predicted inputs (each remote player's last
+Lockstep keeps the pace on a slow link (§4.2) but everyone's inputs land a full round trip late.
+GGPO-style rollback removes that latency: run ahead with predicted inputs (each remote player's last
 known input), and when a real input arrives that differs, restore the snapshot of that tick and
 re-simulate to the present. What it needs, in order:
 

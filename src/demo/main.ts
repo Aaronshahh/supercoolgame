@@ -3715,19 +3715,38 @@ let netTick = 0
 let stallT = 0
 
 /**
- * One tick of lockstep: step the next bundle if it is here, else wait. Exactly one tick per call:
- * the real-time accumulator in the loop decides how many ticks are due, and the net only gates
- * them. (A "catch-up" that steps extra ticks whenever bundles are queued feeds itself, because each
- * tick stepped also submits an input, and the match runs away at two or three times speed.)
+ * How far the local input frontier may run past the last stepped tick: the configured delay, plus
+ * a margin that keeps the host supplied through a round trip the delay does not cover. Inputs ride
+ * the wall clock (netPump), not bundle arrivals: when they rode arrivals, every late bundle also
+ * delayed the next input, and the whole match converged on `delay` ticks per round trip — 28
+ * ticks/s at a 100 ms RTT in the §8 test, slow motion for everyone.
  */
-function netStep() {
+const PIPE_AHEAD = 12
+
+/** One due tick's worth of local input, submitted for the next frontier tick if the window has room. */
+function netPump() {
+  const n = net!
+  if (n.frontier - netTick < n.delay + PIPE_AHEAD) n.submitLocal(n.frontier + 1, readLocalInput())
+}
+
+/**
+ * One tick of lockstep: step the next bundle if it is here, else wait. The real-time accumulator
+ * decides how many ticks are due; a `drain` call is the loop's bounded catch-up (one extra tick a
+ * frame while stepped ticks trail the inputs already sent) and stays quiet about stalls. (An
+ * unbounded catch-up that stepped every queued bundle once fed itself, back when stepping also
+ * submitted the next input, and ran the match at three times speed; the drain cannot, because
+ * netPump alone submits inputs, on the clock.)
+ */
+function netStep(drain = false) {
   const n = net!
   const ti = n.take(netTick + 1)
   if (!ti) {
-    stallT++
-    // No bundles may arrive until a hidden peer steps its queued inputs. Only visible clients
-    // initiate this wake-up; hidden peers responding with wakes would create a feedback loop.
-    if (!document.hidden) n.wakePeers()
+    if (!drain) {
+      stallT++
+      // No bundles may arrive until a hidden peer steps its queued inputs. Only visible clients
+      // initiate this wake-up; hidden peers responding with wakes would create a feedback loop.
+      if (!document.hidden) n.wakePeers()
+    }
     return false
   }
   stallT = 0
@@ -3738,8 +3757,6 @@ function netStep() {
     for (const p of players) inputs[p.id] = p.ai ? aiInput(p) : ti.inputs[p.id] ?? neutralFor(p)
     return inputs
   })
-  // our input for a tick `delay` ahead, so the host has it by the time that tick is due
-  n.submitLocal(netTick + n.delay, readLocalInput())
   if (netTick % HASH_EVERY === 0) {
     const h = stateHash()
     n.reportHash(netTick, h)
@@ -4881,17 +4898,17 @@ export function startGame(cfg: GameConfig) {
       }
       // Death slow-motion is derived from shared sim state, never local picture options.
       if (net) {
-        if (!netStep()) {
-          // Keep one due tick ready for its packet, but discard the rest of a network stall.
-          // Otherwise a background packet can arrive just after we spent its time budget and
-          // the whole pipeline has to wait for a throttled timer to wake it again.
-          acc = tickTime
-          break
-        }
-      }
-      else advance(() => frameInputs(false))
+        // Input first, stepped tick second, each on the clock; a missing bundle costs this
+        // client its tick but never delays the inputs the others are waiting on.
+        netPump()
+        netStep()
+      } else advance(() => frameInputs(false))
       acc -= tickTime
     }
+    // Stepped ticks trailing the inputs already sent is a stall's backlog (or a round trip longer
+    // than the delay hides): drain it one extra tick a frame, no accumulator budget needed, until
+    // the gap is back to the configured delay.
+    if (net && !paused && net.frontier - netTick > net.delay) netStep(true)
   }
   if (net) {
     // Browsers stop rAF in hidden tabs. Respond to the visible players' incoming traffic instead;

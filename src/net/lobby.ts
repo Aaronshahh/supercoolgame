@@ -9,7 +9,7 @@ import { characterIndex } from '../art/characters.ts'
 import type Peer from 'peerjs'
 import { nextTeam, playerLimit, readyToStart } from '../game/roster.ts'
 import { NetSession } from './lockstep.ts'
-import { connectTo, createPeer, describePeerError, makeCode, peerIdFor, roomLink, type DataConnection } from './peer.ts'
+import { connectTo, createPeer, describePeerError, makeCode, peerIdFor, roomLink, simulateLag, type DataConnection } from './peer.ts'
 import { type GuestMsg, type HostMsg, type LobbyPlayer, type LobbySettings, type LobbyView, MAX_PLAYERS, PROTOCOL_VERSION, roundLives, type Team, type StartMsg } from './protocol.ts'
 
 export type LobbyStatus = 'connecting' | 'open' | 'started' | 'closed' | 'error'
@@ -101,6 +101,7 @@ export class Lobby {
   }
 
   private accept(conn: DataConnection) {
+    simulateLag(conn)
     let slot = -1
     conn.on('data', (raw) => {
       const msg = raw as GuestMsg

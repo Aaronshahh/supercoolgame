@@ -28,7 +28,9 @@ if (!(await host.waitFor(/NET lobby host open/, 15000))) {
   console.log('FAIL: the host never opened its room (signaling server unreachable?)')
   process.exit(1)
 }
-await guest.launch(`http://127.0.0.1:${PORT}/index.html?test=join&room=${CODE}`)
+// ?lag= fakes one-way latency on every channel; both sides need it for a full round trip
+const lag = /(?:^|&)lag=(\d+)/.exec(EXTRA)?.[1]
+await guest.launch(`http://127.0.0.1:${PORT}/index.html?test=join&room=${CODE}${lag ? `&lag=${lag}` : ''}`)
 const started = await guest.waitFor(/NET start/, 15000)
 const t0 = Date.now()
 if (started) await sleep(SECS * 1000)

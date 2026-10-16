@@ -58,7 +58,18 @@ export function createPeer(id?: string): Peer {
 
 /** Open a data channel to `peerId`: reliable and ordered (lockstep wants every input, in order), JSON on the wire. */
 export function connectTo(peer: Peer, peerId: string): DataConnection {
-  return peer.connect(peerId, { reliable: true, serialization: 'json' })
+  return simulateLag(peer.connect(peerId, { reliable: true, serialization: 'json' }))
+}
+
+/** `?lag=<ms>` holds every outgoing message that long: fake one-way latency, for netcode testing only. */
+const LAG_MS = Number(new URLSearchParams(location.search).get('lag')) || 0
+export function simulateLag(conn: DataConnection): DataConnection {
+  if (LAG_MS > 0) {
+    const send = conn.send.bind(conn)
+    // a constant delay keeps the order: same-deadline timers fire in the order they were set
+    ;(conn as { send: (data: unknown) => void }).send = (data) => void setTimeout(() => conn.open && send(data), LAG_MS)
+  }
+  return conn
 }
 
 /** The human-readable reason behind a PeerJS error, for the lobby's status line. */

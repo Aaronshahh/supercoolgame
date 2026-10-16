@@ -193,7 +193,8 @@ export class NetSession {
   }
 
   private acceptInput(slot: number, t: number, p: PackedInput) {
-    if (t < this.nextBundle || this.gone.has(slot)) return
+    // clients pump inputs a bounded window past their stepped tick; anything far beyond is a bug
+    if (t < this.nextBundle || t > this.nextBundle + 240 || this.gone.has(slot)) return
     let m = this.pending.get(t)
     if (!m) this.pending.set(t, (m = new Map()))
     m.set(slot, p)
